@@ -1,0 +1,43 @@
+{
+  "name": "mcp-doctor",
+  "version": "0.1.0",
+  "description": "Diagnose, optimize, and manage your Claude Code MCP servers",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-doctor": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "audit": "node dist/cli.js audit",
+    "recommend": "node dist/cli.js recommend"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "model-context-protocol",
+    "audit",
+    "developer-tools"
+  ],
+  "author": "FrankX <friemerx@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/frankxai/mcp-doctor"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "presets/",
+    "README.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
