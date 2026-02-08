@@ -1,5 +1,8 @@
 {
-  "name": "mcp-doctor",
+  "name": "@frankxai/mcp-doctor",
+  "publishConfig": {
+    "access": "public"
+  },
   "version": "0.1.0",
   "description": "Diagnose, optimize, and manage your Claude Code MCP servers",
   "main": "dist/index.js",
