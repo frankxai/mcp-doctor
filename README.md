@@ -3,7 +3,7 @@
 **Diagnose, optimize, and manage your Claude Code MCP servers.**
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![npm version](https://img.shields.io/npm/v/mcp-doctor.svg)](https://www.npmjs.com/package/mcp-doctor)
+[![npm version](https://img.shields.io/npm/v/@frankxai/mcp-doctor.svg)](https://www.npmjs.com/package/@frankxai/mcp-doctor)
 
 ---
 
@@ -18,12 +18,102 @@ Every broken server adds seconds to your startup. Every misconfigured one wastes
 ## Quick Start
 
 ```bash
-npx mcp-doctor audit
+npx @frankxai/mcp-doctor audit
 ```
 
 That's it. One command scans your entire Claude Code configuration, checks every MCP server across all scopes, and gives you a full health report with actionable fix commands.
 
+## Usage
+
+### For Humans (CLI)
+
+```bash
+# Full health check — spawns each server, tests MCP handshake
+npx @frankxai/mcp-doctor audit
+
+# Quick mode — config-only, instant (no spawning)
+npx @frankxai/mcp-doctor audit --quick
+
+# Filter to a specific project
+npx @frankxai/mcp-doctor audit --project my-project
+
+# Browse curated MCP preset packs
+npx @frankxai/mcp-doctor recommend
+npx @frankxai/mcp-doctor recommend ai-architect
+```
+
+### For Claude Code (Agent Integration)
+
+Add mcp-doctor as a slash command so Claude can self-diagnose MCP issues:
+
+```bash
+# Install globally for any session
+npm install -g @frankxai/mcp-doctor
+
+# Run from within a Claude Code session
+mcp-doctor audit --quick
+```
+
+Or use the programmatic API inside a Claude Code hook or skill:
+
+```typescript
+import {
+  scanAllServers,
+  findDuplicates,
+  findMisplacedConfigs,
+  checkAllServers,
+  analyzeTiers,
+  redactSecrets,
+} from "@frankxai/mcp-doctor";
+
+// Scan and check
+const servers = scanAllServers();
+const health = await checkAllServers(servers, { quick: true });
+const duplicates = findDuplicates(servers);
+const misplaced = findMisplacedConfigs();
+const tiers = analyzeTiers(servers, health);
+
+// Safe to log — secrets are redacted
+const message = redactSecrets(someErrorOutput, serverEnv);
+```
+
+### For Other Coding Agents (Cursor, Windsurf, etc.)
+
+MCP Doctor currently reads `~/.claude.json` which is Claude Code's config format. Other agents store MCP configs differently:
+
+| Agent | Config Location | Supported |
+|-------|----------------|-----------|
+| Claude Code | `~/.claude.json` | Yes |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | Planned |
+| Cursor | `.cursor/mcp.json` | Planned |
+| Windsurf | `.windsurf/mcp.json` | Planned |
+| VS Code + Copilot | `.vscode/mcp.json` | Planned |
+
+The core scanning/health-check logic is agent-agnostic — only `config-reader.ts` needs to know where configs live. PRs adding other agent support are welcome.
+
 ## What It Does
+
+### Misplaced Config Detection
+
+The **#1 MCP misconfiguration**: putting `mcpServers` in `settings.json` instead of `.claude.json`. Claude Code silently ignores them. MCP Doctor catches this:
+
+```
+  ⚠ MISPLACED MCP CONFIGS (CRITICAL)
+  ──────────────────────────────────────────────────
+
+  Claude Code IGNORES mcpServers in settings.json files!
+  MCP servers must be in ~/.claude.json (use: claude mcp add)
+
+  ✗ /home/user/.claude/settings.json
+    These servers are configured but NEVER loaded:
+      - my-server
+      - other-server
+
+  How to fix:
+  1. Remove mcpServers from settings.json
+  2. Re-add each server with: claude mcp add <name> -e KEY=val -- <command>
+  3. Verify with: /mcp in Claude Code
+```
 
 ### Health Audit
 
@@ -97,7 +187,7 @@ Generates copy-paste-ready commands to clean up your setup:
   claude mcp remove replicate
 
   # On-demand commands (save for when needed):
-  claude mcp add nanobanana -e GEMINI_API_KEY=AIza...EgP4 -- uvx nanobanana-mcp-server@latest
+  claude mcp add nanobanana -e GEMINI_API_KEY=AIza... -- uvx nanobanana-mcp-server@latest
   claude mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
 ```
 
@@ -111,36 +201,6 @@ A single number that tells you how clean your MCP setup is:
   MCP Health Score: 85/100
 
   8 total servers | 7 healthy | 0 duplicates | 1 should remove
-```
-
-## Commands
-
-### `audit`
-
-Full health check of all MCP servers.
-
-```bash
-# Full audit (spawns each server to test connectivity)
-npx mcp-doctor audit
-
-# Quick mode (config validation only, no spawning — instant)
-npx mcp-doctor audit --quick
-
-# Filter to a specific project
-npx mcp-doctor audit --project my-project
-```
-
-### `recommend`
-
-Browse curated MCP preset packs for your workflow.
-
-```bash
-# List all available presets
-npx mcp-doctor recommend
-
-# Get details + install commands for a specific pack
-npx mcp-doctor recommend web-developer
-npx mcp-doctor recommend ai-architect
 ```
 
 ## Preset Packs
@@ -160,28 +220,16 @@ Pre-configured MCP stacks for common workflows. Each pack specifies which server
 | `security` | Auditing, pen testing, compliance | 2 | 1 |
 | `minimal` | Just the essentials | 1 | 0 |
 
-Example output for `npx mcp-doctor recommend ai-architect`:
+## Security
 
-```
-  AI Architect
-  Building AI systems, agents, and multi-model orchestration
+MCP Doctor reads your `~/.claude.json` which contains API keys and tokens. Here's how we protect them:
 
-  Servers:
-  ● playwright (always-on)
-    Testing AI interfaces, scraping docs, validating outputs
-  ● memory (always-on)
-    Track architecture decisions, model configs, and system patterns
-  ● sequential-thinking (always-on)
-    Multi-step reasoning for agent design and system architecture
-  ◐ browser-use (on-demand)
-    Visual browser agent for testing AI UIs and design tools like v0.dev
+- **Secret redaction**: All output passes through `redactSecrets()` — known env values and 9 common API key regex patterns are replaced with `[REDACTED:KEY_NAME]`
+- **Safe env inheritance**: Spawned processes only receive safe system vars (`PATH`, `HOME`, etc.) + the server's own declared env — not your full `process.env`
+- **No network access**: MCP Doctor never sends data anywhere. It reads local config and spawns local processes only
+- **Zero dependencies**: No supply chain risk from transitive dependencies
 
-  Install commands:
-  claude mcp add playwright -- npx -y @playwright/mcp
-  claude mcp add memory -- npx -y @modelcontextprotocol/server-memory
-  claude mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
-  claude mcp add browser-use -- uvx --from browser-use[cli] browser-use --mcp
-```
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## How It Works
 
@@ -195,10 +243,9 @@ For each server found, it:
 - Validates the configuration structure
 - Checks that required commands exist in PATH
 - Detects placeholder environment variables
+- Scans `settings.json` files for misplaced MCP configs
 - (Full mode) Spawns the process and sends an MCP `initialize` handshake
 - Cross-references against a database of known MCP servers for tier recommendations
-
-API keys found in configs are automatically masked in output (`AIza...EgP4`).
 
 ## MCP Scope Explained
 
@@ -216,12 +263,13 @@ If you're confused about where your servers are configured, here's the hierarchy
 /path/to/project/.mcp.json     ← Shared project scope (committed to git)
 ```
 
-Servers in **user scope** load in every session. Servers in **project-local scope** only load when you're in that directory. Duplicates across scopes waste startup time.
+> **Common mistake**: Putting `mcpServers` in `~/.claude/settings.json` — Claude Code ignores them there. MCP Doctor detects this and tells you how to fix it.
 
 ## Contributing
 
 Contributions welcome. Some ideas:
 
+- **Multi-agent support** — Add config readers for Cursor, Windsurf, VS Code Copilot
 - **New preset packs** — Add presets for your workflow in `src/analyzer/presets.ts`
 - **Known server database** — Expand the tier-optimizer's knowledge of common MCP servers
 - **MCP server mode** — Run mcp-doctor as an MCP server itself (meta!)

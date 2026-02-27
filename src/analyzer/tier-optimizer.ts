@@ -113,7 +113,8 @@ export function analyzeTiers(
 
 function maskSecret(value: string): string {
   if (value.length <= 8) return "***";
-  return value.slice(0, 4) + "..." + value.slice(-4);
+  // Show only first 4 chars — enough to identify which key, not enough to exploit
+  return value.slice(0, 4) + "...";
 }
 
 export function generateOnDemandCommands(
