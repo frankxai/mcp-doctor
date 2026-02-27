@@ -45,7 +45,7 @@ export function formatHeader(): string {
   return [
     "",
     bold("  ╔══════════════════════════════════════╗"),
-    bold("  ║         MCP Doctor v0.2.0            ║"),
+    bold("  ║         MCP Doctor v0.3.0            ║"),
     bold("  ║  Diagnose & optimize your MCP setup  ║"),
     bold("  ╚══════════════════════════════════════╝"),
     "",

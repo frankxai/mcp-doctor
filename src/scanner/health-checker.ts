@@ -25,6 +25,57 @@ function commandExists(command: string): boolean {
   }
 }
 
+/** Env vars safe to inherit — everything else is stripped */
+const SAFE_ENV_KEYS = new Set([
+  "PATH", "HOME", "SHELL", "USER", "LANG", "TERM",
+  "NODE_PATH", "NODE_OPTIONS", "NVM_DIR", "NVM_BIN",
+  "TMPDIR", "TMP", "TEMP", "XDG_RUNTIME_DIR",
+]);
+
+/**
+ * Build a minimal env for spawned processes.
+ * Only passes safe system vars + the server's own env vars.
+ * Prevents leaking AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, etc.
+ */
+function buildSafeEnv(serverEnv: Record<string, string>): Record<string, string> {
+  const safe: Record<string, string> = {};
+  for (const key of SAFE_ENV_KEYS) {
+    if (process.env[key]) {
+      safe[key] = process.env[key]!;
+    }
+  }
+  return { ...safe, ...serverEnv };
+}
+
+/**
+ * Redact any known secret values from a string.
+ * Scans for env var values from the server config and replaces them.
+ * Also catches common API key patterns as a safety net.
+ */
+export function redactSecrets(text: string, serverEnv: Record<string, string>): string {
+  let result = text;
+
+  // Redact known env var values (exact match replacement)
+  for (const [key, value] of Object.entries(serverEnv)) {
+    if (value && value.length > 6) {
+      result = result.replaceAll(value, `[REDACTED:${key}]`);
+    }
+  }
+
+  // Safety net: catch common API key patterns even if not in env
+  result = result.replace(/AIzaSy[A-Za-z0-9_-]{33}/g, "[REDACTED:GEMINI_KEY]");
+  result = result.replace(/sk-ant-api[A-Za-z0-9_-]{20,}/g, "[REDACTED:ANTHROPIC_KEY]");
+  result = result.replace(/sk-[A-Za-z0-9]{20,}/g, "[REDACTED:OPENAI_KEY]");
+  result = result.replace(/re_[A-Za-z0-9]{20,}/g, "[REDACTED:RESEND_KEY]");
+  result = result.replace(/ghp_[A-Za-z0-9]{36,}/g, "[REDACTED:GITHUB_TOKEN]");
+  result = result.replace(/gho_[A-Za-z0-9]{36,}/g, "[REDACTED:GITHUB_OAUTH]");
+  result = result.replace(/npm_[A-Za-z0-9]{36,}/g, "[REDACTED:NPM_TOKEN]");
+  result = result.replace(/xai-[A-Za-z0-9]{20,}/g, "[REDACTED:XAI_KEY]");
+  result = result.replace(/eyJ[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[REDACTED:JWT]");
+
+  return result;
+}
+
 export async function checkServerHealth(
   server: McpServerEntry,
   timeoutMs: number = 10000
@@ -84,7 +135,7 @@ export async function checkServerHealth(
     const args = config.args || [];
 
     const proc = spawn(baseCommand, args, {
-      env: { ...process.env, ...env },
+      env: buildSafeEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -130,7 +181,7 @@ export async function checkServerHealth(
         resolve({
           server,
           status: "broken",
-          message: `Exited with code ${code}${stderr ? `: ${stderr.slice(0, 200)}` : ""}`,
+          message: `Exited with code ${code}${stderr ? `: ${redactSecrets(stderr.slice(0, 200), env)}` : ""}`,
           responseTimeMs: elapsed,
         });
       } else {
@@ -153,7 +204,7 @@ export async function checkServerHealth(
           params: {
             protocolVersion: "2024-11-05",
             capabilities: {},
-            clientInfo: { name: "mcp-doctor", version: "0.1.0" },
+            clientInfo: { name: "mcp-doctor", version: "0.3.0" },
           },
         }) + "\n"
       );

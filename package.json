@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Diagnose, optimize, and manage your Claude Code MCP servers",
   "main": "dist/index.js",
   "bin": {
@@ -14,7 +14,8 @@
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "audit": "node dist/cli.js audit",
-    "recommend": "node dist/cli.js recommend"
+    "recommend": "node dist/cli.js recommend",
+    "prepublishOnly": "tsc"
   },
   "keywords": [
     "claude",
