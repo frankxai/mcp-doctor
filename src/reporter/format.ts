@@ -1,4 +1,4 @@
-import { McpServerEntry } from "../scanner/config-reader.js";
+import { McpServerEntry, MisplacedConfig } from "../scanner/config-reader.js";
 import { HealthResult, HealthStatus } from "../scanner/health-checker.js";
 import { TierRecommendation } from "../analyzer/tier-optimizer.js";
 
@@ -45,7 +45,7 @@ export function formatHeader(): string {
   return [
     "",
     bold("  ╔══════════════════════════════════════╗"),
-    bold("  ║         MCP Doctor v0.1.0            ║"),
+    bold("  ║         MCP Doctor v0.2.0            ║"),
     bold("  ║  Diagnose & optimize your MCP setup  ║"),
     bold("  ╚══════════════════════════════════════╝"),
     "",
@@ -199,5 +199,35 @@ export function formatFixCommands(
   }
 
   lines.push("");
+  return lines.join("\n");
+}
+
+export function formatMisplacedConfigs(misplaced: MisplacedConfig[]): string {
+  if (misplaced.length === 0) return "";
+
+  const lines: string[] = [
+    red(bold("\n  ⚠ MISPLACED MCP CONFIGS (CRITICAL)")),
+    "  " + "─".repeat(50),
+    "",
+    red("  Claude Code IGNORES mcpServers in settings.json files!"),
+    dim("  MCP servers must be in ~/.claude.json (use: claude mcp add)"),
+    "",
+  ];
+
+  for (const entry of misplaced) {
+    lines.push(red(`  ✗ ${entry.filePath}`));
+    lines.push(dim("    These servers are configured but NEVER loaded:"));
+    for (const name of entry.serverNames) {
+      lines.push(yellow(`      - ${name}`));
+    }
+    lines.push("");
+  }
+
+  lines.push(bold("  How to fix:"));
+  lines.push(dim("  1. Remove mcpServers from settings.json"));
+  lines.push(dim("  2. Re-add each server with: claude mcp add <name> -e KEY=val -- <command>"));
+  lines.push(dim("  3. Verify with: /mcp in Claude Code"));
+  lines.push("");
+
   return lines.join("\n");
 }

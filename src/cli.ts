@@ -4,6 +4,7 @@ import {
   scanAllServers,
   findDuplicates,
   findMissingEnvVars,
+  findMisplacedConfigs,
 } from "./scanner/config-reader.js";
 import {
   checkAllServers,
@@ -17,6 +18,7 @@ import {
   formatTierRecommendations,
   formatSummary,
   formatFixCommands,
+  formatMisplacedConfigs,
 } from "./reporter/format.js";
 
 const HELP = `
@@ -76,7 +78,13 @@ async function runAudit(args: string[]) {
   const onDemandServers = toOnDemand.map((t) => t.server);
   const onDemandCommands = generateOnDemandCommands(onDemandServers);
 
+  // Misplaced config check (the #1 MCP misconfiguration)
+  const misplaced = findMisplacedConfigs();
+
   // Output
+  if (misplaced.length > 0) {
+    console.log(formatMisplacedConfigs(misplaced));
+  }
   console.log(formatHealthReport(healthResults));
   console.log(formatDuplicates(duplicates));
   console.log(formatTierRecommendations(tiers));

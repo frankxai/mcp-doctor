@@ -145,6 +145,56 @@ export function findDuplicates(
   return duplicates;
 }
 
+export interface MisplacedConfig {
+  filePath: string;
+  serverNames: string[];
+}
+
+/**
+ * Scan settings.json files for misplaced mcpServers entries.
+ * Claude Code ignores mcpServers in settings.json — they belong in .claude.json.
+ * This is the #1 misconfiguration error users make.
+ */
+export function findMisplacedConfigs(): MisplacedConfig[] {
+  const misplaced: MisplacedConfig[] = [];
+
+  // Check both user-level and common project-level settings.json paths
+  const settingsPaths = [
+    join(homedir(), ".claude", "settings.json"),
+  ];
+
+  // Also scan project directories from .claude.json for their settings.json
+  const config = readClaudeConfig();
+  if (config?.projects) {
+    for (const projectPath of Object.keys(config.projects)) {
+      settingsPaths.push(join(projectPath, ".claude", "settings.json"));
+    }
+  }
+
+  for (const settingsPath of settingsPaths) {
+    if (!existsSync(settingsPath)) continue;
+
+    try {
+      const raw = readFileSync(settingsPath, "utf-8");
+      const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown> };
+
+      if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+        const names = Object.keys(parsed.mcpServers);
+        if (names.length > 0) {
+          misplaced.push({
+            filePath: settingsPath,
+            serverNames: names,
+          });
+        }
+      }
+    } catch {
+      // skip malformed files
+    }
+  }
+
+  return misplaced;
+}
+
 export function findMissingEnvVars(servers: McpServerEntry[]): McpServerEntry[] {
   const suspicious: McpServerEntry[] = [];
 
