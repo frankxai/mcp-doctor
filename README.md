@@ -1,6 +1,6 @@
 # MCP Doctor
 
-**Diagnose, optimize, and manage your Claude Code MCP servers.**
+**Diagnose, optimize, and manage MCP servers across all coding agents.**
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/@frankxai/mcp-doctor.svg)](https://www.npmjs.com/package/@frankxai/mcp-doctor)
@@ -42,54 +42,69 @@ npx @frankxai/mcp-doctor recommend
 npx @frankxai/mcp-doctor recommend ai-architect
 ```
 
-### For Claude Code (Agent Integration)
+### As an MCP Server (Universal Agent Access)
 
-Add mcp-doctor as a slash command so Claude can self-diagnose MCP issues:
+**The meta play:** mcp-doctor IS an MCP server. Any agent that supports MCP can self-diagnose.
 
 ```bash
-# Install globally for any session
-npm install -g @frankxai/mcp-doctor
+# Add to Claude Code
+claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
 
-# Run from within a Claude Code session
-mcp-doctor audit --quick
+# Add to Cursor (.cursor/mcp.json)
+# Add to Cline (cline_mcp_settings.json)
+# Add to Windsurf (mcp_config.json)
+{
+  "mcpServers": {
+    "mcp-doctor": {
+      "command": "npx",
+      "args": ["-y", "@frankxai/mcp-doctor", "serve"]
+    }
+  }
+}
 ```
 
-Or use the programmatic API inside a Claude Code hook or skill:
+Exposes 4 tools: `audit`, `detect_agents`, `find_misplaced`, `recommend`.
+
+### For Claude Code (SessionStart Hook)
+
+Auto-check MCP health on every new session:
+
+```json
+// .claude/settings.json → hooks.SessionStart
+{
+  "type": "command",
+  "command": "bash .claude/hooks/mcp-doctor-check.sh",
+  "timeout": 8
+}
+```
+
+Or use the programmatic API:
 
 ```typescript
-import {
-  scanAllServers,
-  findDuplicates,
-  findMisplacedConfigs,
-  checkAllServers,
-  analyzeTiers,
-  redactSecrets,
-} from "@frankxai/mcp-doctor";
+import { scanAllServers, findDuplicates, findMisplacedConfigs, checkAllServers, analyzeTiers, redactSecrets } from "@frankxai/mcp-doctor";
 
-// Scan and check
 const servers = scanAllServers();
 const health = await checkAllServers(servers, { quick: true });
-const duplicates = findDuplicates(servers);
-const misplaced = findMisplacedConfigs();
 const tiers = analyzeTiers(servers, health);
-
-// Safe to log — secrets are redacted
-const message = redactSecrets(someErrorOutput, serverEnv);
 ```
 
-### For Other Coding Agents (Cursor, Windsurf, etc.)
+### Multi-Agent Support
 
-MCP Doctor currently reads `~/.claude.json` which is Claude Code's config format. Other agents store MCP configs differently:
+Detects and reads MCP configs from all major coding agents:
 
-| Agent | Config Location | Supported |
-|-------|----------------|-----------|
-| Claude Code | `~/.claude.json` | Yes |
-| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | Planned |
-| Cursor | `.cursor/mcp.json` | Planned |
-| Windsurf | `.windsurf/mcp.json` | Planned |
-| VS Code + Copilot | `.vscode/mcp.json` | Planned |
+```bash
+npx @frankxai/mcp-doctor agents
+```
 
-The core scanning/health-check logic is agent-agnostic — only `config-reader.ts` needs to know where configs live. PRs adding other agent support are welcome.
+| Agent | Config Location | Key | Supported |
+|-------|----------------|-----|-----------|
+| Claude Code | `~/.claude.json` | `mcpServers` | Yes |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers` | Yes |
+| Cline | `globalStorage/.../cline_mcp_settings.json` | `mcpServers` | Yes |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | Yes |
+| VS Code | `~/.config/Code/User/mcp.json` | `servers` | Yes |
+
+Config differences are normalized automatically (VS Code's `servers` key, Windsurf's `serverUrl` field, etc.).
 
 ## What It Does
 

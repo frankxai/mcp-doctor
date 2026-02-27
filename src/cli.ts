@@ -20,6 +20,8 @@ import {
   formatFixCommands,
   formatMisplacedConfigs,
 } from "./reporter/format.js";
+import { startMcpServer } from "./mcp-server.js";
+import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
 
 const HELP = `
   Usage: mcp-doctor <command> [options]
@@ -30,13 +32,18 @@ const HELP = `
     audit --project X  Filter to specific project path
     recommend          Show preset packs for your workflow
     recommend <pack>   Show details for a specific pack
+    agents             Detect installed coding agents and their MCP configs
+    serve              Run as an MCP server (for agent self-diagnosis)
     help               Show this help message
 
   Examples:
-    npx mcp-doctor audit
-    npx mcp-doctor audit --quick
-    npx mcp-doctor recommend
-    npx mcp-doctor recommend web-developer
+    npx @frankxai/mcp-doctor audit
+    npx @frankxai/mcp-doctor audit --quick
+    npx @frankxai/mcp-doctor recommend ai-architect
+    npx @frankxai/mcp-doctor agents
+
+  MCP Server Mode:
+    claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
 `;
 
 async function runAudit(args: string[]) {
@@ -158,6 +165,39 @@ function runRecommend(args: string[]) {
   console.log("  \x1b[90mUsage: npx mcp-doctor recommend <pack-name>\x1b[0m\n");
 }
 
+function runAgents() {
+  console.log(formatHeader());
+  console.log("  Detecting installed coding agents...\n");
+
+  const agents = detectInstalledAgents();
+
+  if (agents.length === 0) {
+    console.log("  No coding agents with MCP configs detected.\n");
+    return;
+  }
+
+  for (const info of agents) {
+    const icon = info.serverCount > 0 ? "\x1b[32m●\x1b[0m" : "\x1b[90m○\x1b[0m";
+    console.log(`  ${icon} \x1b[1m${info.agent}\x1b[0m — ${info.serverCount} server(s)`);
+    if (info.globalPath) console.log(`    \x1b[90mConfig: ${info.globalPath}\x1b[0m`);
+    for (const pp of info.projectPaths) {
+      console.log(`    \x1b[90mProject: ${pp}\x1b[0m`);
+    }
+  }
+
+  const otherAgents = scanAllAgents();
+  for (const { agent, servers } of otherAgents) {
+    if (servers.length > 0) {
+      console.log(`\n  \x1b[1m${agent} servers:\x1b[0m`);
+      for (const s of servers) {
+        const cmd = s.config.command ? `${s.config.command} ${(s.config.args || []).slice(0, 2).join(" ")}` : s.config.url || "";
+        console.log(`    ${s.name} \x1b[90m→ ${cmd}\x1b[0m`);
+      }
+    }
+  }
+  console.log("");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -169,6 +209,12 @@ async function main() {
     case "recommend":
       runRecommend(args.slice(1));
       break;
+    case "agents":
+      runAgents();
+      break;
+    case "serve":
+      startMcpServer();
+      return; // serve runs indefinitely
     case "help":
     case "--help":
     case "-h":

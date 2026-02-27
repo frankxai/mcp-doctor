@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Diagnose, optimize, and manage your Claude Code MCP servers",
   "main": "dist/index.js",
   "bin": {

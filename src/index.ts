@@ -21,3 +21,7 @@ export type { TierRecommendation } from "./analyzer/tier-optimizer.js";
 
 export { listPresets, getPreset, generateInstallCommands, PRESETS } from "./analyzer/presets.js";
 export type { PresetPack, PresetServer } from "./analyzer/presets.js";
+
+export { startMcpServer } from "./mcp-server.js";
+export { detectInstalledAgents, scanAgentServers, scanAllAgents } from "./scanner/multi-agent-reader.js";
+export type { AgentType, AgentConfigInfo } from "./scanner/multi-agent-reader.js";
