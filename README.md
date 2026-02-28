@@ -47,17 +47,36 @@ npx @frankxai/mcp-doctor recommend ai-architect
 **The meta play:** mcp-doctor IS an MCP server. Any agent that supports MCP can self-diagnose.
 
 ```bash
-# Add to Claude Code
-claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
+# Install globally (recommended — avoids cold-start timeouts)
+npm install -g @frankxai/mcp-doctor
 
-# Add to Cursor (.cursor/mcp.json)
-# Add to Cline (cline_mcp_settings.json)
-# Add to Windsurf (mcp_config.json)
+# Add to Claude Code
+claude mcp add mcp-doctor -- mcp-doctor serve
+
+# Or with explicit path (if 'mcp-doctor' isn't in PATH)
+claude mcp add mcp-doctor -- $(which mcp-doctor) serve
+```
+
+For Cursor, Cline, Windsurf — add to their respective config file:
+```json
 {
   "mcpServers": {
     "mcp-doctor": {
-      "command": "npx",
-      "args": ["-y", "@frankxai/mcp-doctor", "serve"]
+      "command": "mcp-doctor",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+For VS Code (`.vscode/mcp.json`):
+```json
+{
+  "servers": {
+    "mcp-doctor": {
+      "type": "stdio",
+      "command": "mcp-doctor",
+      "args": ["serve"]
     }
   }
 }
@@ -284,11 +303,10 @@ If you're confused about where your servers are configured, here's the hierarchy
 
 Contributions welcome. Some ideas:
 
-- **Multi-agent support** — Add config readers for Cursor, Windsurf, VS Code Copilot
 - **New preset packs** — Add presets for your workflow in `src/analyzer/presets.ts`
 - **Known server database** — Expand the tier-optimizer's knowledge of common MCP servers
-- **MCP server mode** — Run mcp-doctor as an MCP server itself (meta!)
 - **Auto-fix** — Apply recommendations automatically with `--fix` flag
+- **Cross-agent sync** — Detect servers in one agent and offer to add to another
 
 ```bash
 git clone https://github.com/frankxai/mcp-doctor
