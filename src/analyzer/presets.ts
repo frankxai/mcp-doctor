@@ -9,6 +9,7 @@ export interface PresetServer {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  installCommand?: string;
   tier: "always-on" | "on-demand";
   why: string;
 }
@@ -164,6 +165,65 @@ export const PRESETS: Record<string, PresetPack> = {
     ],
   },
 
+  "agent-os": {
+    name: "Agent OS",
+    description: "Hermes, OpenClaw, DeepAgents, Claude Code, Codex, GitHub, Vercel, browser automation, and memory",
+    servers: [
+      {
+        name: "memory",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-memory"],
+        tier: "always-on",
+        why: "Persistent architecture memory for Hermes profiles, OpenClaw gateways, DeepAgents harnesses, Codex rules, and Claude Code skills",
+      },
+      {
+        name: "agent-os-filesystem",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "<path-to-agent-repos>"],
+        tier: "always-on",
+        why: "Scoped local access to agent repo configs, AGENTS.md, CLAUDE.md, Hermes/OpenClaw/DeepAgents notes, and audit scripts",
+      },
+      {
+        name: "playwright",
+        command: "npx",
+        args: ["-y", "@playwright/mcp"],
+        tier: "always-on",
+        why: "Browser automation for dashboards, Vercel previews, OpenClaw control UI, Hermes cockpit, and smoke tests",
+      },
+      {
+        name: "sequential-thinking",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        tier: "always-on",
+        why: "Structured planning for multi-agent architecture, migration decisions, and trust-boundary reviews",
+      },
+      {
+        name: "github",
+        command: "docker",
+        args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+        env: { GITHUB_PERSONAL_ACCESS_TOKEN: "<your-github-token>" },
+        installCommand: "claude mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PAT -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server",
+        tier: "on-demand",
+        why: "GitHub issues, pull requests, repo inspection, and actions for Codex/Claude maintainer lanes",
+      },
+      {
+        name: "vercel",
+        command: "npx",
+        args: ["add-mcp", "https://mcp.vercel.com"],
+        installCommand: "npx add-mcp https://mcp.vercel.com",
+        tier: "on-demand",
+        why: "Official hosted Vercel MCP for deployment logs, projects, and platform context",
+      },
+      {
+        name: "browser-use",
+        command: "uvx",
+        args: ["--from", "browser-use[cli]", "browser-use", "--mcp"],
+        tier: "on-demand",
+        why: "Visual browser agent for inspecting agent dashboards, docs, and managed offerings",
+      },
+    ],
+  },
+
   devops: {
     name: "DevOps",
     description: "CI/CD, infrastructure, containers, and deployment automation",
@@ -310,7 +370,7 @@ export function generateInstallCommands(preset: PresetPack): string[] {
       : "";
 
     const cmd = `claude mcp add ${server.name}${envFlags ? " " + envFlags : ""} -- ${server.command} ${server.args.join(" ")}`;
-    commands.push(cmd);
+    commands.push(server.installCommand ?? cmd);
   }
 
   return commands;

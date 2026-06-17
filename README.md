@@ -248,6 +248,7 @@ Pre-configured MCP stacks for common workflows. Each pack specifies which server
 | `data-engineer` | Databases, APIs, pipelines | 2 | 1 |
 | `music-producer` | AI music, lyrics, audio | 1 | 2 |
 | `ai-architect` | Agents, multi-model systems | 3 | 1 |
+| `agent-os` | Hermes, OpenClaw, DeepAgents, Claude Code, Codex, GitHub, Vercel, browser automation, memory | 4 | 3 |
 | `devops` | CI/CD, infrastructure, containers | 2 | 1 |
 | `mobile-dev` | React Native, Flutter, native | 1 | 2 |
 | `researcher` | Academic, technical writing | 2 | 1 |
