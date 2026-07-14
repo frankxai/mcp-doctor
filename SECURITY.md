@@ -45,3 +45,16 @@ If you discover a security vulnerability, please report it responsibly:
 3. **Do not** open a public GitHub issue for security vulnerabilities
 
 I aim to respond within 48 hours and provide a fix within 7 days for confirmed vulnerabilities.
+
+<!-- STARLIGHT-REPO-CONTRACT:START -->
+## Starlight repository contract
+
+Contract: `starlight.repo_profile.v2` · Team: `starlight-platform-team` · Priority: `now`
+### Data boundary
+
+- Classification: `internal`
+- PII allowed in product-owned storage: `false`
+- Auth owner: `None`
+
+Never read or print `.env` values. Keep secrets in approved secret stores, keep PII out of analytics events and receipts, scan untrusted code before execution, and stop on credential or private-memory exposure.
+<!-- STARLIGHT-REPO-CONTRACT:END -->
