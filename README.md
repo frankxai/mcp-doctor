@@ -312,8 +312,8 @@ Contributions welcome. Some ideas:
 ```bash
 git clone https://github.com/frankxai/mcp-doctor
 cd mcp-doctor
-npm install
-npm run build
+pnpm install
+pnpm run build
 node dist/cli.js audit --quick
 ```
 
