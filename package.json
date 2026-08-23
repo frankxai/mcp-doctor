@@ -16,11 +16,11 @@
     "audit",
     "developer-tools"
   ],
+  "type": "module",
   "mcpName": "io.github.frankxai/mcp-doctor",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
-  "type": "module",
   "packageManager": "pnpm@11.22.0",
   "bin": {
     "mcp-doctor": "dist/cli.js"
@@ -31,7 +31,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist/",

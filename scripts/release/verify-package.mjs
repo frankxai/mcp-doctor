@@ -5,6 +5,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
@@ -43,6 +44,39 @@ if (kind === 'mcp') step('mcp stdio smoke — does it speak the protocol', () =>
   const bin = Object.values(pkg.bin ?? {})[0];
   if (!bin) throw new Error('kind=mcp but package.json declares no bin and no smoke:mcp script');
   run('node', ['scripts/release/mcp-stdio-smoke.mjs', 'node', bin.replace(/^\.\//, '')]);
+});
+
+if (existsSync('server.json')) step('server.json — the MCP registry manifest must not drift from the package', () => {
+  // changesets bumps package.json only. Nothing syncs server.json, so without this the registry
+  // listing advertises the previous version from the very next release onward — the same drift
+  // defect this package just fixed in its own handshake.
+  const s = JSON.parse(readFileSync('server.json', 'utf8'));
+  const problems = [];
+  if (s.version !== pkg.version) problems.push(`server.json version ${s.version} ≠ package ${pkg.version}`);
+  for (const p of s.packages ?? []) {
+    if (p.version !== pkg.version) problems.push(`packages[${p.identifier}].version ${p.version} ≠ package ${pkg.version}`);
+    if (p.identifier !== pkg.name) problems.push(`packages[].identifier ${p.identifier} ≠ package name ${pkg.name}`);
+  }
+  if (pkg.mcpName && s.name !== pkg.mcpName) problems.push(`server.json name ${s.name} ≠ package.json mcpName ${pkg.mcpName}`);
+  if (problems.length) throw new Error(problems.join('\n  ') + '\n  run: node scripts/release/sync-server-json.mjs');
+  console.log(`  ✓ ${s.name} @ ${s.version} matches the package`);
+});
+
+step('vendored release scripts match the kit', () => {
+  // These files are copies. Without a check they drift, and the gate you think you are running is
+  // not the gate that is running — two PRs establishing one standard already shipped two versions.
+  const manifest = 'scripts/release/.kit-manifest.json';
+  if (!existsSync(manifest)) { console.log('  (no kit manifest — skipping drift check)'); return; }
+  const expected = JSON.parse(readFileSync(manifest, 'utf8'));
+  const drifted = [];
+  for (const [file, hash] of Object.entries(expected.files ?? {})) {
+    const path = `scripts/release/${file}`;
+    if (!existsSync(path)) { drifted.push(`${file} is missing`); continue; }
+    const actual = createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+    if (actual !== hash) drifted.push(`${file} differs from kit ${expected.kitVersion ?? ''} (${actual} ≠ ${hash})`);
+  }
+  if (drifted.length) throw new Error(drifted.join('\n  ') + '\n  re-run: node tools/npm-release-kit/apply.mjs --repo <this repo>');
+  console.log(`  ✓ ${Object.keys(expected.files ?? {}).length} vendored scripts match the kit`);
 });
 
 if (!args.includes('--skip-audit')) step('audit — production dependencies only', () => {

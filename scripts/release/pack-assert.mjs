@@ -6,32 +6,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, rmSync, mkdtempSync, readdirSync } from 'node:fs';
-import { gunzipSync } from 'node:zlib';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-
-// The tarball is read in-process rather than by shelling out to `tar`: GNU tar on Windows parses
-// `C:\path` as a remote host:path and fails, so a shell-out passes in Linux CI and breaks on the
-// machine that actually cuts the release. Reading it here works identically everywhere.
-function readTar(file) {
-  const buf = gunzipSync(readFileSync(file));
-  const out = [];
-  for (let off = 0; off + 512 <= buf.length;) {
-    const header = buf.subarray(off, off + 512);
-    if (header.every(b => b === 0)) break;
-    const str = (start, len) => header.subarray(start, start + len).toString('utf8').replace(/\0.*$/, '').trim();
-    const name = str(0, 100);
-    const size = parseInt(str(124, 12) || '0', 8) || 0;
-    const typeflag = str(156, 1) || '0';
-    const prefix = str(345, 155);
-    const full = prefix ? `${prefix}/${name}` : name;
-    const dataStart = off + 512;
-    if (typeflag === '0' || typeflag === '') out.push({ name: full, size, read: () => buf.subarray(dataStart, dataStart + size) });
-    else if (typeflag === '5') out.push({ name: full, size: 0, dir: true, read: () => Buffer.alloc(0) });
-    off = dataStart + Math.ceil(size / 512) * 512;
-  }
-  return out;
-}
+import { readTar } from './read-tar.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
@@ -53,7 +30,9 @@ try {
   process.exit(1);
 }
 
-const tar = readTar(tgz).filter(e => !e.dir);
+const tarAll = readTar(tgz);
+const links = tarAll.filter(e => e.kind === 'symlink' || e.kind === 'hardlink');
+const tar = tarAll.filter(e => !e.dir);
 const listing = tar.map(e => e.name.replace(/^package\//, '').replace(/\/$/, ''));
 const entries = new Set(listing);
 const byName = new Map(tar.map(e => [e.name.replace(/^package\//, ''), e]));
@@ -89,7 +68,15 @@ for (const [dep, range] of Object.entries(pkg.dependencies ?? {})) {
   if (/^(workspace|link|file|portal):/.test(String(range))) fail.push(`dependency ${dep}@${range} uses a local protocol — npx install will fail for everyone else`);
 }
 
-// 5. Size budget.
+// 5. Links. A symlink is a file for every purpose that matters here, and one pointing outside the
+//    package is an escape the forbidden-name list cannot see.
+for (const l of links) {
+  const target = l.link ?? '';
+  if (target.startsWith('/') || target.split('/').includes('..')) fail.push(`${l.kind} "${l.name}" points outside the package: ${target}`);
+  else note.push(`${l.kind}: ${l.name} -> ${target}`);
+}
+
+// 6. Size budget.
 const kb = Math.round(unpacked / 1024);
 if (kb > budgetKB) fail.push(`unpacked ${kb} KB exceeds the ${budgetKB} KB budget (raise it in kit.json deliberately, or trim \`files\`)`);
 

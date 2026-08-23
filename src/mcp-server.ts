@@ -15,7 +15,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { readFileSync } from "node:fs";
+import { PACKAGE_VERSION } from "./version.js";
 import {
   scanAllServers,
   findDuplicates,
@@ -32,10 +32,6 @@ import {
   scanAllAgents,
 } from "./scanner/multi-agent-reader.js";
 
-// Read at runtime so the handshake can never advertise a version the package is not.
-const PACKAGE_VERSION: string = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8")
-).version;
 
 // --- JSON-RPC types ---
 interface JsonRpcRequest {

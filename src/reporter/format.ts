@@ -1,6 +1,7 @@
 import { McpServerEntry, MisplacedConfig } from "../scanner/config-reader.js";
 import { HealthResult, HealthStatus } from "../scanner/health-checker.js";
 import { TierRecommendation } from "../analyzer/tier-optimizer.js";
+import { PACKAGE_VERSION } from "../version.js";
 
 const ICONS: Record<HealthStatus, string> = {
   healthy: "\x1b[32m✓\x1b[0m",
@@ -45,7 +46,7 @@ export function formatHeader(): string {
   return [
     "",
     bold("  ╔══════════════════════════════════════╗"),
-    bold("  ║         MCP Doctor v0.4.0            ║"),
+    bold("  ║" + `MCP Doctor v${PACKAGE_VERSION}`.padStart(25).padEnd(38) + "║"),
     bold("  ║  Diagnose & optimize your MCP setup  ║"),
     bold("  ╚══════════════════════════════════════╝"),
     "",

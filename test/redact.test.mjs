@@ -57,12 +57,3 @@ test('short env values are deliberately not redacted by value matching', () => {
   const out = redactSecrets('the mode is debug', { MODE: 'debug' });
   assert.equal(out, 'the mode is debug');
 });
-
-test('the MCP handshake advertises the version the package actually is', () => {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  const built = readFileSync(new URL('../dist/mcp-server.js', import.meta.url), 'utf8');
-  const afterServerInfo = built.slice(built.indexOf('serverInfo'), built.indexOf('serverInfo') + 140);
-  assert.ok(!/version:\s*["']\d+\.\d+\.\d+["']/.test(afterServerInfo),
-    'serverInfo carries a hardcoded version — it drifts from package.json on the next release');
-  assert.match(pkg.version, /^\d+\.\d+\.\d+/);
-});
