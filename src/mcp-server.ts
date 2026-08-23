@@ -14,7 +14,8 @@
  *   - recommend: Browse preset packs
  */
 
-import { createInterface } from "readline";
+import { createInterface } from "node:readline";
+import { PACKAGE_VERSION } from "./version.js";
 import {
   scanAllServers,
   findDuplicates,
@@ -30,6 +31,7 @@ import {
   detectInstalledAgents,
   scanAllAgents,
 } from "./scanner/multi-agent-reader.js";
+
 
 // --- JSON-RPC types ---
 interface JsonRpcRequest {
@@ -294,7 +296,7 @@ async function handleMessage(msg: JsonRpcRequest): Promise<void> {
       respond(msg.id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "mcp-doctor", version: "0.4.0" },
+        serverInfo: { name: "mcp-doctor", version: PACKAGE_VERSION },
       });
       break;
 

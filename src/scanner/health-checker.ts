@@ -1,5 +1,6 @@
 import { spawn, execFileSync } from "child_process";
 import { McpServerEntry } from "./config-reader.js";
+import { PACKAGE_VERSION } from "../version.js";
 
 export type HealthStatus =
   | "healthy"
@@ -204,7 +205,7 @@ export async function checkServerHealth(
           params: {
             protocolVersion: "2024-11-05",
             capabilities: {},
-            clientInfo: { name: "mcp-doctor", version: "0.3.0" },
+            clientInfo: { name: "mcp-doctor", version: PACKAGE_VERSION },
           },
         }) + "\n"
       );

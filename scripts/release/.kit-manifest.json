@@ -1,0 +1,10 @@
+{
+  "kitVersion": "pnpm@11.22.0",
+  "generated": "by tools/npm-release-kit/apply.mjs",
+  "files": {
+    "mcp-stdio-smoke.mjs": "f9bf6de2a331ff96",
+    "pack-assert.mjs": "e378cc33ed082eb9",
+    "read-tar.mjs": "be876bb7c402e107",
+    "verify-package.mjs": "87b62b36af104ca9"
+  }
+}

@@ -1,21 +1,12 @@
 {
   "name": "@frankxai/mcp-doctor",
-  "publishConfig": {
-    "access": "public"
-  },
   "version": "0.4.1",
   "description": "Diagnose, optimize, and manage your Claude Code MCP servers",
-  "main": "dist/index.js",
-  "bin": {
-    "mcp-doctor": "dist/cli.js"
-  },
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "start": "node dist/cli.js",
-    "audit": "node dist/cli.js audit",
-    "recommend": "node dist/cli.js recommend",
-    "prepublishOnly": "tsc"
+  "license": "MIT",
+  "author": "FrankX <friemerx@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frankxai/mcp-doctor.git"
   },
   "keywords": [
     "claude",
@@ -25,23 +16,49 @@
     "audit",
     "developer-tools"
   ],
-  "author": "FrankX <friemerx@gmail.com>",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/frankxai/mcp-doctor"
-  },
+  "type": "module",
+  "mcpName": "io.github.frankxai/mcp-doctor",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "bin": {
+    "mcp-doctor": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist/",
-    "presets/",
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "audit": "node dist/cli.js audit",
+    "recommend": "node dist/cli.js recommend",
+    "prepublishOnly": "tsc",
+    "verify": "node scripts/release/verify-package.mjs --kind mcp --budget-kb 200",
+    "smoke:mcp": "node scripts/release/mcp-stdio-smoke.mjs --expect audit,detect_agents,find_misplaced,recommend -- node dist/cli.js serve",
+    "changeset": "changeset",
+    "release:version": "changeset version",
+    "release:publish": "changeset publish",
+    "test": "node --test \"test/*.test.mjs\""
+  },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "@types/node": "^20.0.0"
+    "@changesets/cli": "3.0.1",
+    "@types/node": "^22.9.0",
+    "typescript": "~5.9.3"
   }
 }
