@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.frankxai/mcp-doctor",
+  "description": "Diagnose, optimize, and manage MCP servers across Claude Code, Codex, Cursor, Gemini and Windsurf — duplicate detection, health checks, tier optimisation. Reads local config only; no credentials leave the machine.",
+  "version": "0.4.1",
+  "repository": {
+    "url": "https://github.com/frankxai/mcp-doctor",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@frankxai/mcp-doctor",
+      "version": "0.4.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": []
+    }
+  ]
+}

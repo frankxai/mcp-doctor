@@ -14,7 +14,8 @@
  *   - recommend: Browse preset packs
  */
 
-import { createInterface } from "readline";
+import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 import {
   scanAllServers,
   findDuplicates,
@@ -30,6 +31,11 @@ import {
   detectInstalledAgents,
   scanAllAgents,
 } from "./scanner/multi-agent-reader.js";
+
+// Read at runtime so the handshake can never advertise a version the package is not.
+const PACKAGE_VERSION: string = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")
+).version;
 
 // --- JSON-RPC types ---
 interface JsonRpcRequest {
@@ -294,7 +300,7 @@ async function handleMessage(msg: JsonRpcRequest): Promise<void> {
       respond(msg.id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "mcp-doctor", version: "0.4.0" },
+        serverInfo: { name: "mcp-doctor", version: PACKAGE_VERSION },
       });
       break;
 
