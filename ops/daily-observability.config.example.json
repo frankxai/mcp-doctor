@@ -1,0 +1,44 @@
+{
+  "schema": "starlight.dailyObservabilityConfig.v1",
+  "containsSecretValues": false,
+  "outputDirectory": "%USERPROFILE%\\.starlight\\observability\\daily",
+  "mcpRegistryPath": "%USERPROFILE%\\starlight\\mcp-registry.json",
+  "secretManifestPath": "%USERPROFILE%\\starlight\\repos\\starlight-agent-config\\core\\secrets\\frankx-secret-manifest.json",
+  "tokscaleSummaryPath": "%USERPROFILE%\\.starlight\\usage\\tokscale\\starlight-tokscale-summary-latest.json",
+  "tokscaleLiveEnabled": true,
+  "tokscaleMaxAgeHours": 36,
+  "costBudgetPath": "%USERPROFILE%\\starlight\\repos\\starlight-agent-config\\core\\business-os\\cost-budget.json",
+  "costWindowHours": 24,
+  "loopRoot": "%USERPROFILE%\\starlight\\repos\\starlight-agent-config\\.loop",
+  "subscriptionRegistryPath": "%USERPROFILE%\\.starlight\\observability\\subscription-registry.json",
+  "mcpConfigs": [
+    { "harness": "codex", "format": "toml", "path": "%USERPROFILE%\\.codex\\config.toml", "required": true },
+    { "harness": "claude", "format": "json", "path": "%USERPROFILE%\\.claude.json", "required": true },
+    { "harness": "grok", "format": "toml", "path": "%USERPROFILE%\\.grok\\config.toml", "required": false },
+    { "harness": "hermes", "format": "yaml", "path": "%LOCALAPPDATA%\\hermes\\config.yaml", "required": false },
+    { "harness": "cursor", "format": "json", "path": "%USERPROFILE%\\.cursor\\mcp.json", "required": false },
+    { "harness": "opencode", "format": "json", "path": "%USERPROFILE%\\.config\\opencode\\opencode.json", "required": false },
+    { "harness": "factory", "format": "json", "path": "%USERPROFILE%\\.factory\\mcp.json", "required": false },
+    { "harness": "vscode", "format": "json", "path": "%APPDATA%\\Code\\User\\mcp.json", "required": false }
+  ],
+  "scheduledTasks": [
+    { "name": "StarlightDailyObservability", "required": true, "maxAgeHours": 30 },
+    { "name": "StarlightAPIKeyMonitor", "required": true, "maxAgeHours": 48 },
+    { "name": "StarlightSecretScan", "required": true, "maxAgeHours": 48 },
+    { "name": "StarlightMachineSentinel", "required": true, "maxAgeHours": 48 },
+    { "name": "StarlightTaskHealthWatch", "required": true, "maxAgeHours": 3 },
+    { "name": "StarlightSubstrateBackup", "required": true, "maxAgeHours": 48 }
+  ],
+  "securityReports": [
+    { "id": "machine-sentinel", "type": "sentinel-markdown", "path": "%USERPROFILE%\\starlight\\repos\\Starlight-Intelligence-System\\private\\api-monitor\\SENTINEL-STATUS.md", "required": true, "maxAgeHours": 48 },
+    { "id": "secret-scan", "type": "secret-findings", "directory": "%USERPROFILE%\\starlight\\repos\\Starlight-Intelligence-System\\private\\api-monitor", "pattern": "secret-findings-*.md", "required": true, "maxAgeHours": 48 },
+    { "id": "provider-health", "type": "api-usage-json", "directory": "%USERPROFILE%\\starlight\\repos\\Starlight-Intelligence-System\\private\\api-monitor", "pattern": "usage-*.json", "required": true, "maxAgeHours": 48 }
+  ],
+  "railway": {
+    "enabled": true,
+    "expectedProjects": ["automation-production", "observability-production"],
+    "costAllocationPath": "%USERPROFILE%\\.starlight\\observability\\railway-cost-allocation.json",
+    "volumeWarningPct": 80,
+    "volumeCriticalPct": 90
+  }
+}

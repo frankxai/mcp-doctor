@@ -21,6 +21,13 @@ Every broken server adds seconds to your startup. Every misconfigured one wastes
 npx @frankxai/mcp-doctor audit
 ```
 
+For a redacted daily control-plane receipt across MCP registrations, credential
+coverage, scheduled guards, Railway billing and service posture, security
+evidence, token usage, loop budgets, cost allocation, and subscription invoices,
+see
+[`docs/DAILY-OBSERVABILITY.md`](docs/DAILY-OBSERVABILITY.md). The observer is
+evidence-only: it never emits credential values or mutates external services.
+
 That's it. One command scans your entire Claude Code configuration, checks every MCP server across all scopes, and gives you a full health report with actionable fix commands.
 
 ## Usage

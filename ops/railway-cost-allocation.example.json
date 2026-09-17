@@ -1,0 +1,40 @@
+{
+  "schema": "starlight.railwayCostAllocation.v1",
+  "containsSecretValues": false,
+  "overheadClasses": ["platform-overhead", "dependency-overhead", "security-overhead"],
+  "targets": {
+    "monthlyOptimizationTargetUsd": 40,
+    "softAlertUsd": 50,
+    "proposedHardLimitUsd": 75,
+    "maxMemorySharePct": 80,
+    "maxOverheadSharePct": 70
+  },
+  "projects": {
+    "observability-production": {
+      "purpose": "Shared telemetry and model gateway",
+      "defaultCostClass": "platform-overhead",
+      "priority": "required-if-observability-is-active",
+      "services": {
+        "analytics-store": {
+          "purpose": "Telemetry analytics storage",
+          "costClass": "platform-overhead",
+          "priority": "required",
+          "optimization": "Apply retention and right-size memory before considering removal."
+        }
+      }
+    },
+    "automation-production": {
+      "purpose": "Revenue and operations automation",
+      "defaultCostClass": "dependency-overhead",
+      "priority": "business-critical",
+      "services": {
+        "worker": {
+          "purpose": "Workflow execution",
+          "costClass": "direct-workload",
+          "priority": "business-critical",
+          "optimization": "Scale from measured queue demand; do not stop active workers automatically."
+        }
+      }
+    }
+  }
+}

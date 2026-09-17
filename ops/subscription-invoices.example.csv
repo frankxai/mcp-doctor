@@ -1,0 +1,2 @@
+provider_id,invoice_period,gross_amount_usd,tax_usd,credits_usd,net_amount_usd,covered_months,currency,verified_at,evidence_reference
+provider-example,2026-08,20.00,4.20,0.00,24.20,1,USD,2026-08-31,private/invoices/provider-example-2026-08.pdf
