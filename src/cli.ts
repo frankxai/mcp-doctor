@@ -21,6 +21,7 @@ import {
   formatMisplacedConfigs,
 } from "./reporter/format.js";
 import { startMcpServer } from "./mcp-server.js";
+import { checkServer } from "./checker/check-server.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
 
 const HELP = `
@@ -34,6 +35,8 @@ const HELP = `
     recommend <pack>   Show details for a specific pack
     agents             Detect installed coding agents and their MCP configs
     serve              Run as an MCP server (for agent self-diagnosis)
+    check -- <cmd>     Spawn a stdio MCP server, lint its tools, exit 1 on violations
+    check --json -- <cmd>  Same, JSON report on stdout (for CI)
     help               Show this help message
 
   Examples:
@@ -41,6 +44,7 @@ const HELP = `
     npx @frankxai/mcp-doctor audit --quick
     npx @frankxai/mcp-doctor recommend ai-architect
     npx @frankxai/mcp-doctor agents
+    npx @frankxai/mcp-doctor check --json -- node dist/server.js
 
   MCP Server Mode:
     claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
@@ -198,6 +202,26 @@ function runAgents() {
   console.log("");
 }
 
+async function runCheck(args: string[]): Promise<number> {
+  const split = args.indexOf("--");
+  const target = split === -1 ? [] : args.slice(split + 1);
+  if (target.length === 0) {
+    console.error("  Usage: mcp-doctor check [--json] -- <command> [args...]");
+    return 1;
+  }
+  const report = await checkServer(target[0], target.slice(1));
+  if (args.slice(0, split).includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    const label = report.server ? `${report.server.name}@${report.server.version}` : target.join(" ");
+    console.log(`  ${report.ok ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} ${label} — ${report.toolCount} tool(s)`);
+    for (const issue of report.issues) {
+      console.log(`    [${issue.rule}]${issue.tool ? ` ${issue.tool}:` : ""} ${issue.message}`);
+    }
+  }
+  return report.ok ? 0 : 1;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -212,6 +236,9 @@ async function main() {
     case "agents":
       runAgents();
       break;
+    case "check":
+      process.exitCode = await runCheck(args.slice(1));
+      return;
     case "serve":
       startMcpServer();
       return; // serve runs indefinitely
