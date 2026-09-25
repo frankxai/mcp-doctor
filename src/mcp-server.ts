@@ -15,6 +15,7 @@
  */
 
 import { createInterface } from "readline";
+import { VERSION } from "./version.js";
 import {
   scanAllServers,
   findDuplicates,
@@ -294,7 +295,7 @@ async function handleMessage(msg: JsonRpcRequest): Promise<void> {
       respond(msg.id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "mcp-doctor", version: "0.4.0" },
+        serverInfo: { name: "mcp-doctor", version: VERSION },
       });
       break;
 
