@@ -11,7 +11,7 @@ This repo is part of the FrankX / Starlight / Arcanea agent estate.
 
 ## What this repo is
 
-MCP Doctor audits MCP server configs across Claude Code, Cursor, Cline, Windsurf, and VS Code — detects misplaced configs, duplicates, broken/unconfigured servers, and gives tier recommendations (always-on / on-demand / remove). It also runs as an MCP server itself (`mcp-doctor serve`), exposing `audit`, `detect_agents`, `find_misplaced`, `recommend`.
+MCP Doctor audits MCP server configs across Claude Code, Cursor, Cline, Windsurf, and VS Code — detects misplaced configs, duplicates, broken/unconfigured servers, and gives tier recommendations (always-on / on-demand / remove). It also runs as an MCP server itself (`mcp-doctor serve`), exposing `mcp_doctor_audit`, `mcp_doctor_agents`, `mcp_doctor_misplaced_configs`, `mcp_doctor_preset_packs` (structured output; scores 100% on `mcp-doctor score`).
 
 - `src/cli.ts` — CLI entry point
 - `src/mcp-server.ts` — MCP server mode entry point

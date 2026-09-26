@@ -103,7 +103,7 @@ For VS Code (`.vscode/mcp.json`):
 }
 ```
 
-Exposes 4 tools: `audit`, `detect_agents`, `find_misplaced`, `recommend`.
+Exposes 4 read-only tools with typed, structured output: `mcp_doctor_audit`, `mcp_doctor_agents`, `mcp_doctor_misplaced_configs`, `mcp_doctor_preset_packs`. It scores 100% on its own `mcp-doctor score` bar.
 
 ### For Claude Code (SessionStart Hook)
 
