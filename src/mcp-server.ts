@@ -1,373 +1,264 @@
 #!/usr/bin/env node
 
 /**
- * MCP Doctor as an MCP Server.
- * Any agent that supports MCP can add this server and self-diagnose.
+ * MCP Doctor as an MCP server, so an agent can diagnose its own MCP setup.
  *
- * Usage:
- *   claude mcp add mcp-doctor -- npx @frankxai/mcp-doctor serve
- *
- * Exposes tools:
- *   - audit: Full or quick health check of all MCP servers
- *   - detect_agents: Show which coding agents are installed
- *   - find_misplaced: Check for misplaced MCP configs
- *   - recommend: Browse preset packs
+ *   claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
  */
 
-import { createInterface } from "readline";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 import { VERSION } from "./version.js";
 import {
+  McpServerEntry,
   scanAllServers,
   findDuplicates,
   findMisplacedConfigs,
 } from "./scanner/config-reader.js";
-import {
-  checkAllServers,
-  redactSecrets,
-} from "./scanner/health-checker.js";
+import { checkAllServers } from "./scanner/health-checker.js";
 import { analyzeTiers } from "./analyzer/tier-optimizer.js";
-import { listPresets, PRESETS } from "./analyzer/presets.js";
-import {
-  detectInstalledAgents,
-  scanAllAgents,
-} from "./scanner/multi-agent-reader.js";
+import { PRESETS } from "./analyzer/presets.js";
+import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
 
-// --- JSON-RPC types ---
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number | string;
-  method: string;
-  params?: Record<string, unknown>;
-}
-
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id: number | string | null;
-  result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
-}
-
-// --- MCP tool definitions ---
-const TOOLS = [
-  {
-    name: "audit",
-    description: "Run a health check on all MCP servers configured for Claude Code. Returns health status, duplicates, tier recommendations, and a health score. Use quick=true for config-only validation (instant), or quick=false to spawn each server and test the MCP handshake.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        quick: {
-          type: "boolean" as const,
-          description: "If true, only validate config (no spawning). Default: true.",
-          default: true,
-        },
-        project: {
-          type: "string" as const,
-          description: "Filter to servers for a specific project path substring.",
-        },
-      },
-    },
-  },
-  {
-    name: "detect_agents",
-    description: "Detect which coding agents (Claude Code, Cursor, Cline, Windsurf, VS Code) are installed on this system and how many MCP servers each has configured.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {},
-    },
-  },
-  {
-    name: "find_misplaced",
-    description: "Check for MCP servers incorrectly placed in settings.json files (Claude Code ignores these). This is the #1 MCP misconfiguration.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {},
-    },
-  },
-  {
-    name: "recommend",
-    description: "Get curated MCP preset packs for a specific workflow. Returns always-on and on-demand server recommendations with install commands.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        pack: {
-          type: "string" as const,
-          description: "Preset pack name (e.g., 'web-developer', 'ai-architect', 'content-creator'). Omit to list all available packs.",
-        },
-      },
-    },
-  },
+const MISPLACED_FIX = [
+  "Remove the mcpServers block from each settings.json listed.",
+  "Re-add each server with: claude mcp add <name> -e KEY=value -- <command>",
+  "Confirm with /mcp in Claude Code.",
 ];
 
-// --- Tool handlers ---
-async function handleAudit(params: Record<string, unknown>): Promise<string> {
-  const quick = params.quick !== false; // default true
-  const projectFilter = params.project as string | undefined;
+const PACK_KEYS = Object.keys(PRESETS) as [string, ...string[]];
 
-  const servers = scanAllServers(projectFilter);
-  if (servers.length === 0) {
-    return "No MCP servers found. Is Claude Code installed?\nExpected config at: ~/.claude.json";
+const scope = z.enum(["user", "project-local", "mcp-json", "claude-ai"]);
+const misplacedSchema = z.object({ filePath: z.string(), serverNames: z.array(z.string()) });
+
+/**
+ * Where a server runs, never how it authenticates: args, env and URL query strings
+ * routinely carry tokens, and tool output lands in transcripts.
+ */
+function endpointOf(server: McpServerEntry): string {
+  if (server.config.command) return server.config.command;
+  if (!server.config.url) return "unknown";
+  try {
+    const url = new URL(server.config.url);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "invalid url";
   }
+}
 
-  const healthResults = await checkAllServers(servers, { quick });
-  const duplicates = findDuplicates(servers);
-  const tiers = analyzeTiers(servers, healthResults);
-  const misplaced = findMisplacedConfigs();
+function structured<T extends Record<string, unknown>>(value: T) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    structuredContent: value,
+  };
+}
 
-  const healthy = healthResults.filter((r) => r.status === "healthy").length;
-  const broken = healthResults.filter((r) => r.status === "broken" || r.status === "missing-command").length;
-  const missingEnv = healthResults.filter((r) => r.status === "missing-env").length;
-  const toRemove = tiers.filter((t) => t.recommendedTier === "remove");
-  const score = Math.round(
-    ((healthy - duplicates.size - toRemove.length) / Math.max(servers.length, 1)) * 100
+export function createDoctorServer(): McpServer {
+  const server = new McpServer(
+    { name: "mcp-doctor", version: VERSION },
+    {
+      instructions:
+        "Diagnose this machine's MCP setup. Start with mcp_doctor_audit (quick=true is instant); if a server the user expects is missing, run mcp_doctor_misplaced_configs.",
+    },
   );
 
-  const lines: string[] = [];
-  lines.push(`## MCP Doctor Audit (${quick ? "quick" : "full"} mode)`);
-  lines.push(`**${servers.length}** servers found | **${healthy}** healthy | **${broken}** broken | **${missingEnv}** missing config`);
-  lines.push(`**Health Score: ${score}/100**\n`);
-
-  // Misplaced configs
-  if (misplaced.length > 0) {
-    lines.push("### CRITICAL: Misplaced Configs");
-    lines.push("Claude Code IGNORES mcpServers in settings.json files!\n");
-    for (const m of misplaced) {
-      lines.push(`- **${m.filePath}**: ${m.serverNames.join(", ")}`);
-    }
-    lines.push("Fix: Remove mcpServers from settings.json, re-add with `claude mcp add`\n");
-  }
-
-  // Health details
-  lines.push("### Server Health");
-  for (const result of healthResults) {
-    const icon = result.status === "healthy" ? "OK" : result.status === "missing-env" ? "WARN" : "FAIL";
-    const ms = result.responseTimeMs ? ` (${result.responseTimeMs}ms)` : "";
-    const msg = result.status !== "healthy" ? ` — ${result.message}` : "";
-    lines.push(`- [${icon}] **${result.server.name}** [${result.server.scope}]${ms}${msg}`);
-  }
-
-  // Duplicates
-  if (duplicates.size > 0) {
-    lines.push("\n### Duplicates");
-    for (const [name, entries] of duplicates) {
-      lines.push(`- **${name}** registered ${entries.length}x: ${entries.map((e) => e.scope + (e.projectPath ? ` (${e.projectPath.split("/").pop()})` : "")).join(", ")}`);
-    }
-  }
-
-  // Tier recommendations
-  lines.push("\n### Recommendations");
-  const alwaysOn = tiers.filter((t) => t.recommendedTier === "always-on");
-  const onDemand = tiers.filter((t) => t.recommendedTier === "on-demand");
-
-  if (alwaysOn.length > 0) {
-    lines.push("**Always-On** (load every session):");
-    for (const t of alwaysOn) lines.push(`- ${t.server.name} — ${t.reason}`);
-  }
-  if (toRemove.length > 0) {
-    lines.push("**Remove** (broken/misconfigured):");
-    for (const t of toRemove) {
-      lines.push(`- ${t.server.name} — ${t.reason}`);
-      lines.push(`  Fix: \`claude mcp remove ${t.server.name}\``);
-    }
-  }
-  if (onDemand.length > 0) {
-    lines.push(`**On-Demand** (${onDemand.length} servers — add when needed)`);
-  }
-
-  return lines.join("\n");
-}
-
-function handleDetectAgents(): string {
-  const agents = detectInstalledAgents();
-  const otherAgents = scanAllAgents();
-
-  if (agents.length === 0) {
-    return "No coding agents with MCP configs detected on this system.";
-  }
-
-  const lines: string[] = ["## Installed Coding Agents with MCP\n"];
-
-  for (const info of agents) {
-    lines.push(`### ${info.agent}`);
-    lines.push(`- Servers configured: **${info.serverCount}**`);
-    if (info.globalPath) lines.push(`- Global config: \`${info.globalPath}\``);
-    for (const pp of info.projectPaths) lines.push(`- Project config: \`${pp}\``);
-    lines.push("");
-  }
-
-  // Show servers from other agents
-  for (const { agent, servers } of otherAgents) {
-    if (servers.length > 0) {
-      lines.push(`### ${agent} servers`);
-      for (const s of servers) {
-        lines.push(`- **${s.name}** [${s.scope}] — ${s.config.command || s.config.url || "unknown"}`);
-      }
-      lines.push("");
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function handleFindMisplaced(): string {
-  const misplaced = findMisplacedConfigs();
-
-  if (misplaced.length === 0) {
-    return "No misplaced MCP configs found. All configs are in the correct locations.";
-  }
-
-  const lines: string[] = [
-    "## CRITICAL: Misplaced MCP Configs Found\n",
-    "Claude Code IGNORES mcpServers in settings.json files!",
-    "MCP servers must be in ~/.claude.json (use: `claude mcp add`)\n",
-  ];
-
-  for (const entry of misplaced) {
-    lines.push(`### ${entry.filePath}`);
-    lines.push("These servers are configured but NEVER loaded:");
-    for (const name of entry.serverNames) {
-      lines.push(`- ${name}`);
-    }
-    lines.push("");
-  }
-
-  lines.push("**Fix:**");
-  lines.push("1. Remove mcpServers from settings.json");
-  lines.push("2. Re-add each server with: `claude mcp add <name> -e KEY=val -- <command>`");
-  lines.push("3. Verify with: `/mcp` in Claude Code");
-
-  return lines.join("\n");
-}
-
-function handleRecommend(params: Record<string, unknown>): string {
-  const packName = params.pack as string | undefined;
-
-  if (packName) {
-    const preset = PRESETS[packName] || listPresets().find(
-      (p) => p.name.toLowerCase().replace(/\s+/g, "-") === packName
-    );
-
-    if (!preset) {
-      const available = listPresets().map((p) => p.name.toLowerCase().replace(/\s+/g, "-"));
-      return `Unknown preset: "${packName}"\n\nAvailable: ${available.join(", ")}`;
-    }
-
-    const lines: string[] = [
-      `## ${preset.name}`,
-      preset.description,
-      "",
-      "### Servers",
-    ];
-
-    for (const server of preset.servers) {
-      lines.push(`- **${server.name}** (${server.tier}) — ${server.why}`);
-    }
-
-    return lines.join("\n");
-  }
-
-  // List all presets
-  const lines: string[] = ["## Available MCP Preset Packs\n"];
-  for (const preset of listPresets()) {
-    const key = preset.name.toLowerCase().replace(/\s+/g, "-");
-    const alwaysOn = preset.servers.filter((s) => s.tier === "always-on").length;
-    const onDemand = preset.servers.filter((s) => s.tier === "on-demand").length;
-    lines.push(`- **${preset.name}** (\`${key}\`) — ${preset.description} (${alwaysOn} always-on, ${onDemand} on-demand)`);
-  }
-  lines.push("\nUse `recommend` with `pack` parameter to see details.");
-
-  return lines.join("\n");
-}
-
-// --- MCP protocol handler ---
-function respond(id: number | string | null, result: unknown): void {
-  const response: JsonRpcResponse = { jsonrpc: "2.0", id, result };
-  process.stdout.write(JSON.stringify(response) + "\n");
-}
-
-function respondError(id: number | string | null, code: number, message: string): void {
-  const response: JsonRpcResponse = { jsonrpc: "2.0", id, error: { code, message } };
-  process.stdout.write(JSON.stringify(response) + "\n");
-}
-
-async function handleMessage(msg: JsonRpcRequest): Promise<void> {
-  switch (msg.method) {
-    case "initialize":
-      respond(msg.id, {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: { name: "mcp-doctor", version: VERSION },
+  server.registerTool(
+    "mcp_doctor_audit",
+    {
+      title: "Audit MCP servers",
+      description:
+        "Health-check every MCP server configured for Claude Code and return per-server status, duplicates, misplaced configs, tier advice and a 0-100 health score. quick=true (default) only validates config and is instant; quick=false starts every configured server command to test its handshake, which is slower and runs third-party code.",
+      inputSchema: {
+        quick: z
+          .boolean()
+          .default(true)
+          .describe("true: validate config only (instant). false: start each server and test the MCP handshake."),
+        project: z
+          .string()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Only include servers whose project path contains this substring."),
+      },
+      outputSchema: {
+        mode: z.enum(["quick", "full"]),
+        summary: z.object({
+          servers: z.number(),
+          healthy: z.number(),
+          broken: z.number(),
+          missingEnv: z.number(),
+          healthScore: z.number(),
+        }),
+        servers: z.array(
+          z.object({
+            name: z.string(),
+            scope,
+            endpoint: z.string(),
+            status: z.string(),
+            message: z.string(),
+            responseTimeMs: z.number().optional(),
+          }),
+        ),
+        duplicates: z.array(z.object({ name: z.string(), scopes: z.array(z.string()) })),
+        misplaced: z.array(misplacedSchema),
+        recommendations: z.array(
+          z.object({ name: z.string(), tier: z.enum(["always-on", "on-demand", "remove"]), reason: z.string() }),
+        ),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ quick, project }) => {
+      const servers = scanAllServers(project);
+      const health = await checkAllServers(servers, { quick });
+      const duplicates = findDuplicates(servers);
+      const tiers = analyzeTiers(servers, health);
+      const healthy = health.filter((r) => r.status === "healthy").length;
+      const toRemove = tiers.filter((t) => t.recommendedTier === "remove").length;
+      const raw = ((healthy - duplicates.size - toRemove) / Math.max(servers.length, 1)) * 100;
+      return structured({
+        mode: quick ? "quick" : "full",
+        summary: {
+          servers: servers.length,
+          healthy,
+          broken: health.filter((r) => r.status === "broken" || r.status === "missing-command").length,
+          missingEnv: health.filter((r) => r.status === "missing-env").length,
+          healthScore: Math.min(100, Math.max(0, Math.round(raw))),
+        },
+        servers: health.map((r) => ({
+          name: r.server.name,
+          scope: r.server.scope,
+          endpoint: endpointOf(r.server),
+          status: r.status,
+          message: r.message,
+          ...(r.responseTimeMs === undefined ? {} : { responseTimeMs: r.responseTimeMs }),
+        })),
+        duplicates: [...duplicates].map(([name, entries]) => ({
+          name,
+          scopes: entries.map((e) => e.scope + (e.projectPath ? `:${e.projectPath}` : "")),
+        })),
+        misplaced: findMisplacedConfigs(),
+        recommendations: tiers.map((t) => ({ name: t.server.name, tier: t.recommendedTier, reason: t.reason })),
       });
-      break;
+    },
+  );
 
-    case "notifications/initialized":
-      // No response needed for notifications
-      break;
+  server.registerTool(
+    "mcp_doctor_agents",
+    {
+      title: "Detect coding agents",
+      description:
+        "Detect which coding agents (Claude Code, Cursor, Cline, Windsurf, VS Code) have MCP configs on this machine, where those configs live, and which servers each registers. Reads config files only; starts nothing.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: {
+        agents: z.array(
+          z.object({
+            agent: z.string(),
+            serverCount: z.number(),
+            globalPath: z.string().nullable(),
+            projectPaths: z.array(z.string()),
+          }),
+        ),
+        servers: z.array(z.object({ agent: z.string(), name: z.string(), scope, endpoint: z.string() })),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () =>
+      structured({
+        agents: detectInstalledAgents(),
+        servers: scanAllAgents().flatMap(({ agent, servers }) =>
+          servers.map((s) => ({ agent, name: s.name, scope: s.scope, endpoint: endpointOf(s) })),
+        ),
+      }),
+  );
 
-    case "tools/list":
-      respond(msg.id, { tools: TOOLS });
-      break;
+  server.registerTool(
+    "mcp_doctor_misplaced_configs",
+    {
+      title: "Check for misplaced MCP configs",
+      description:
+        "Find MCP servers declared in Claude Code settings.json files, which Claude Code silently ignores (they belong in ~/.claude.json). Use when a server the user configured never appears. Returns each file, its ignored servers, and the fix.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: { misplaced: z.array(misplacedSchema), fix: z.array(z.string()) },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      const misplaced = findMisplacedConfigs();
+      return structured({ misplaced, fix: misplaced.length ? MISPLACED_FIX : [] });
+    },
+  );
 
-    case "tools/call": {
-      const params = msg.params || {};
-      const toolName = params.name as string;
-      const toolArgs = (params.arguments || {}) as Record<string, unknown>;
+  server.registerTool(
+    "mcp_doctor_preset_packs",
+    {
+      title: "Recommend MCP preset packs",
+      description:
+        "Curated MCP server packs per workflow. Without `pack`, returns every pack with its always-on and on-demand counts; with `pack`, returns that pack's servers, why each is in it, and its install command. Static data; no network.",
+      inputSchema: {
+        pack: z.enum(PACK_KEYS).optional().describe(`One pack for detail: ${PACK_KEYS.join(", ")}. Omit for the overview.`),
+      },
+      outputSchema: {
+        packs: z.array(
+          z.object({
+            key: z.string(),
+            name: z.string(),
+            description: z.string(),
+            alwaysOn: z.number(),
+            onDemand: z.number(),
+          }),
+        ),
+        pack: z
+          .object({
+            key: z.string(),
+            name: z.string(),
+            description: z.string(),
+            servers: z.array(
+              z.object({
+                name: z.string(),
+                tier: z.enum(["always-on", "on-demand"]),
+                why: z.string(),
+                installCommand: z.string().optional(),
+              }),
+            ),
+          })
+          .optional(),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ pack }) => {
+      const packs = Object.entries(PRESETS).map(([key, p]) => ({
+        key,
+        name: p.name,
+        description: p.description,
+        alwaysOn: p.servers.filter((s) => s.tier === "always-on").length,
+        onDemand: p.servers.filter((s) => s.tier === "on-demand").length,
+      }));
+      if (!pack) return structured({ packs });
+      const chosen = PRESETS[pack];
+      return structured({
+        packs,
+        pack: {
+          key: pack,
+          name: chosen.name,
+          description: chosen.description,
+          servers: chosen.servers.map((s) => ({
+            name: s.name,
+            tier: s.tier,
+            why: s.why,
+            ...(s.installCommand ? { installCommand: s.installCommand } : {}),
+          })),
+        },
+      });
+    },
+  );
 
-      try {
-        let result: string;
-        switch (toolName) {
-          case "audit":
-            result = await handleAudit(toolArgs);
-            break;
-          case "detect_agents":
-            result = handleDetectAgents();
-            break;
-          case "find_misplaced":
-            result = handleFindMisplaced();
-            break;
-          case "recommend":
-            result = handleRecommend(toolArgs);
-            break;
-          default:
-            respondError(msg.id, -32601, `Unknown tool: ${toolName}`);
-            return;
-        }
-        respond(msg.id, { content: [{ type: "text", text: result }] });
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        respond(msg.id, {
-          content: [{ type: "text", text: `Error: ${errMsg}` }],
-          isError: true,
-        });
-      }
-      break;
-    }
-
-    default:
-      if (!msg.method.startsWith("notifications/")) {
-        respondError(msg.id, -32601, `Method not found: ${msg.method}`);
-      }
-  }
+  return server;
 }
 
-// --- Main ---
-export function startMcpServer(): void {
-  const rl = createInterface({ input: process.stdin });
-
-  rl.on("line", async (line: string) => {
-    try {
-      const msg = JSON.parse(line) as JsonRpcRequest;
-      await handleMessage(msg);
-    } catch {
-      // Ignore malformed input
-    }
-  });
-
-  rl.on("close", () => {
-    process.exit(0);
-  });
+export async function startMcpServer(): Promise<void> {
+  await createDoctorServer().connect(new StdioServerTransport());
 }
 
-// Auto-start if run directly
 if (process.argv[1]?.endsWith("mcp-server.js")) {
-  startMcpServer();
+  void startMcpServer();
 }
