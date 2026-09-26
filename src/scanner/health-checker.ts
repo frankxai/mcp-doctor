@@ -14,6 +14,8 @@ export interface HealthResult {
   status: HealthStatus;
   message: string;
   responseTimeMs?: number;
+  /** Redacted stderr tail. Local terminal output only: never put it in MCP results or tier reasons. */
+  detail?: string;
 }
 
 function commandExists(command: string): boolean {
@@ -52,6 +54,19 @@ function buildSafeEnv(serverEnv: Record<string, string>): Record<string, string>
  * Scans for env var values from the server config and replaces them.
  * Also catches common API key patterns as a safety net.
  */
+const SECRET_FLAG = /token|key|secret|passw|auth|bearer|credential/i;
+
+/** Values passed on the command line as --token=x or --token x. Servers often echo their argv on failure. */
+export function redactArgSecrets(text: string, args: string[]): string {
+  let result = text;
+  args.forEach((arg, i) => {
+    const eq = arg.indexOf("=");
+    const value = eq > 0 && SECRET_FLAG.test(arg.slice(0, eq)) ? arg.slice(eq + 1) : i > 0 && SECRET_FLAG.test(args[i - 1]) && args[i - 1].startsWith("-") ? arg : "";
+    if (value.length > 6) result = result.replaceAll(value, "[REDACTED:ARG]");
+  });
+  return result;
+}
+
 export function redactSecrets(text: string, serverEnv: Record<string, string>): string {
   let result = text;
 
@@ -181,7 +196,8 @@ export async function checkServerHealth(
         resolve({
           server,
           status: "broken",
-          message: `Exited with code ${code}${stderr ? `: ${redactSecrets(stderr.slice(0, 200), env)}` : ""}`,
+          message: `Exited with code ${code}`,
+          ...(stderr ? { detail: redactArgSecrets(redactSecrets(stderr.slice(0, 200), env), config.args ?? []) } : {}),
           responseTimeMs: elapsed,
         });
       } else {

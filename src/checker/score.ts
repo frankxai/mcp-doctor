@@ -29,6 +29,11 @@ interface JsonSchema {
   const?: unknown;
   format?: string;
   maximum?: number;
+  exclusiveMaximum?: number;
+  maxItems?: number;
+  items?: JsonSchema;
+  properties?: Record<string, JsonSchema>;
+  additionalProperties?: unknown;
 }
 
 export interface Criterion {
@@ -50,8 +55,20 @@ export interface ScoreReport {
 }
 
 const MIN_DESCRIPTION = 80;
-const LIST_LIKE = /(^|[_.-])(list|search|find|query)|^(list|search|find|query)/i;
-const PAGING_PARAMS = new Set(["limit", "page_size", "pageSize", "max_results", "maxResults", "cursor", "page", "per_page"]);
+const COLLECTION_VERBS = new Set(["list", "search", "find", "query", "browse", "all"]);
+const SIZE_PARAMS = new Set(["limit", "page_size", "pageSize", "max_results", "maxResults", "per_page", "perPage"]);
+const POSITION_PARAMS = new Set(["cursor", "page", "offset"]);
+/** Formats whose values are short by definition; `uri` and friends are not. */
+const BOUNDED_FORMATS = new Set(["uuid", "date", "date-time", "time", "email", "ipv4", "ipv6", "duration"]);
+
+/** "listSessions" / "list_sessions" -> ["list", "sessions"]; whole words, so "listening_status" is not a list. */
+function words(name: string): string[] {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+export function isCollectionTool(name: string): boolean {
+  return words(name).some((word) => COLLECTION_VERBS.has(word));
+}
 
 export const MANUAL_CHECKS = [
   "Errors: validation and business failures return isError:true with a fix hint; only unknown tools and malformed requests use JSON-RPC errors",
@@ -80,10 +97,14 @@ function criterion(
   return { id, label, points: points(relevant.length - failing.length, relevant.length), applicable: relevant.length, failing, advice };
 }
 
-/** "@scope/fixture-mcp" -> "fixture" */
+/**
+ * The whole service name, not its first word: "mcp-doctor" -> "mcp_doctor" (so "mcp_unrelated"
+ * does not pass), "@scope/fixture-mcp" -> "fixture", "@modelcontextprotocol/server-filesystem" -> "filesystem".
+ */
 export function servicePrefix(serverName: string): string {
-  const bare = serverName.replace(/^@[^/]+\//, "").toLowerCase();
-  return bare.split(/[^a-z0-9]+/).filter(Boolean)[0] ?? bare;
+  const bare = words(serverName.replace(/^@[^/]+\//, "")).join("_");
+  const trimmed = bare.replace(/^(mcp_)?server_/, "").replace(/(_mcp)?(_server)?$/, "");
+  return trimmed || bare;
 }
 
 function namespaceCriterion(tools: ScoredTool[], serverName: string): Criterion {
@@ -101,18 +122,35 @@ function namespaceCriterion(tools: ScoredTool[], serverName: string): Criterion 
   };
 }
 
+/** Anchored and free of unbounded quantifiers, so it caps length: ^[a-z]{2,8}$ yes, ^.*$ no. */
+function patternBoundsLength(pattern: string): boolean {
+  return pattern.startsWith("^") && pattern.endsWith("$") && !/[*+]|\{\d+,\}/.test(pattern.replace(/\\./g, ""));
+}
+
+function bounded(schema: JsonSchema): boolean {
+  if (schema.enum !== undefined || schema.const !== undefined) return true;
+  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (types.includes("string")) {
+    return schema.maxLength !== undefined || (schema.format !== undefined && BOUNDED_FORMATS.has(schema.format)) || (schema.pattern !== undefined && patternBoundsLength(schema.pattern));
+  }
+  if (types.includes("integer") || types.includes("number")) return schema.maximum !== undefined || schema.exclusiveMaximum !== undefined;
+  if (types.includes("array")) return schema.maxItems !== undefined && (schema.items === undefined || bounded(schema.items));
+  if (types.includes("object")) {
+    return schema.additionalProperties === false && Object.values(schema.properties ?? {}).every(bounded);
+  }
+  return types.includes("boolean") || types.includes("null");
+}
+
 function inputIsDocumentedAndBounded(tool: ScoredTool): boolean {
   const properties = Object.values(tool.inputSchema?.properties ?? {});
   if (properties.length === 0) return tool.inputSchema?.additionalProperties === false;
-  return properties.every((property) => {
-    if (!property.description?.trim()) return false;
-    const types = Array.isArray(property.type) ? property.type : [property.type];
-    if (types.includes("string")) {
-      return property.maxLength !== undefined || property.pattern !== undefined || property.enum !== undefined || property.const !== undefined || property.format !== undefined;
-    }
-    if (types.includes("integer") || types.includes("number")) return property.maximum !== undefined || property.enum !== undefined;
-    return true;
-  });
+  return properties.every((property) => Boolean(property.description?.trim()) && bounded(property));
+}
+
+function pages(tool: ScoredTool): boolean {
+  return Object.entries(tool.inputSchema?.properties ?? {}).some(
+    ([key, schema]) => POSITION_PARAMS.has(key) || (SIZE_PARAMS.has(key) && bounded(schema)),
+  );
 }
 
 function annotated(tool: ScoredTool): boolean {
@@ -123,6 +161,13 @@ function annotated(tool: ScoredTool): boolean {
 
 export function scoreTools(tools: ScoredTool[], serverName: string): ScoreReport {
   const every = () => true;
+  if (tools.length === 0) {
+    const advice = "The server lists no tools, so there is nothing an agent can use. Check it registers tools before connecting.";
+    const empty = ["annotations", "titles", "namespace", "descriptions", "inputs", "structured_output", "paging"].map(
+      (id): Criterion => ({ id, label: "No tools to grade", points: 0, applicable: 0, failing: [], advice }),
+    );
+    return { points: 0, max: empty.length * 2, percent: 0, criteria: empty, manual: MANUAL_CHECKS };
+  }
   const criteria: Criterion[] = [
     criterion("annotations", "Safety annotations (readOnlyHint; writers add destructiveHint and idempotentHint)", tools, every, annotated,
       "Unannotated tools default to destructive and open-world, and some clients drop them. Set readOnlyHint on every tool."),
@@ -133,12 +178,11 @@ export function scoreTools(tools: ScoredTool[], serverName: string): ScoreReport
       (tool) => (tool.description ?? "").trim().length >= MIN_DESCRIPTION,
       "Say when to use the tool, when not to, and how large or costly the response is."),
     criterion("inputs", "Every input described and bounded; no-input tools set additionalProperties:false", tools, every, inputIsDocumentedAndBounded,
-      "Describe each property; give strings maxLength/pattern/enum and numbers a maximum."),
+      "Describe each property; give strings maxLength or an enum, numbers a maximum, arrays maxItems, objects additionalProperties:false."),
     criterion("structured_output", "Declares outputSchema (and returns structuredContent)", tools, every, (tool) => tool.outputSchema !== undefined,
       "Declare an object outputSchema, return structuredContent, and keep the JSON text block for older clients."),
-    criterion("paging", "List and search tools take a limit or cursor", tools, (tool) => LIST_LIKE.test(tool.name),
-      (tool) => Object.keys(tool.inputSchema?.properties ?? {}).some((key) => PAGING_PARAMS.has(key)),
-      "Give list and search tools a limit (with a sensible default) or a cursor so responses stay small."),
+    criterion("paging", "List and search tools take a bounded limit or a cursor", tools, (tool) => isCollectionTool(tool.name), pages,
+      "Give list and search tools a limit with a maximum (and a sensible default) or a cursor so responses stay small."),
   ];
   const earned = criteria.reduce((sum, item) => sum + item.points, 0);
   const max = criteria.length * 2;

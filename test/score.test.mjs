@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { scoreTools } from '../dist/checker/score.js';
+import { isCollectionTool, scoreTools, servicePrefix } from '../dist/checker/score.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(here, 'fixtures', 'fixture-server.mjs');
@@ -31,7 +31,7 @@ const best = [
     description: 'Save a note to the local vault, replacing any note with the same id. Use only when the user asks to keep something.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string', pattern: '^[a-z0-9-]+$', description: 'Note id' }, body: { type: 'string', maxLength: 10000, description: 'Markdown body' } },
+      properties: { id: { type: 'string', pattern: '^[a-z0-9-]{1,64}$', description: 'Note id' }, body: { type: 'string', maxLength: 10000, description: 'Markdown body' } },
       required: ['id', 'body'],
     },
     outputSchema: { type: 'object', properties: { saved: { type: 'boolean' } } },
@@ -101,4 +101,50 @@ test('cli score: JSON report and --min gate', () => {
   const poor = run(bare, ['--min', '50']);
   assert.equal(poor.status, 1);
   assert.ok(JSON.parse(poor.stdout).percent < 50);
+});
+
+test('a server with no tools scores 0 and fails the cli gate', () => {
+  assert.equal(scoreTools([], 'fixture').percent, 0);
+  const run = spawnSync(process.execPath, [cli, 'score', '--json', '--', process.execPath, fixture, '[]'], { encoding: 'utf8' });
+  assert.equal(run.status, 1);
+});
+
+test('servicePrefix keeps the whole service name', () => {
+  assert.equal(servicePrefix('mcp-doctor'), 'mcp_doctor');
+  assert.equal(servicePrefix('@scope/fixture-mcp'), 'fixture');
+  assert.equal(servicePrefix('@modelcontextprotocol/server-filesystem'), 'filesystem');
+  assert.equal(servicePrefix('arcanea-mcp-server'), 'arcanea');
+  const tools = best.map((tool) => ({ ...tool, name: tool.name.replace('fixture_', 'mcp_unrelated_') }));
+  assert.notEqual(byId(scoreTools(tools, 'mcp-doctor')).namespace.points, 2, 'a shared first word is not the prefix');
+});
+
+test('inputs: presence of a pattern, format or array is not a bound', () => {
+  const pts = (schema) =>
+    byId(scoreTools([{ ...best[2], inputSchema: { type: 'object', properties: { x: { description: 'x', ...schema } } } }], 'fixture')).inputs.points;
+  assert.equal(pts({ type: 'string', pattern: '.*' }), 0);
+  assert.equal(pts({ type: 'string', pattern: '^[a-z]+$' }), 0);
+  assert.equal(pts({ type: 'string', format: 'uri' }), 0);
+  assert.equal(pts({ type: 'array', items: { type: 'string', maxLength: 9 } }), 0);
+  assert.equal(pts({ type: 'object', properties: { y: { type: 'string' } } }), 0);
+  assert.equal(pts({ type: 'string', pattern: '^[a-z]{2,8}$' }), 2);
+  assert.equal(pts({ type: 'string', format: 'uuid' }), 2);
+  assert.equal(pts({ type: 'array', maxItems: 5, items: { type: 'string', maxLength: 9 } }), 2);
+  assert.equal(pts({ type: 'boolean' }), 2);
+});
+
+test('paging: whole-word collection verbs, and the limit itself must be bounded', () => {
+  assert.equal(isCollectionTool('listening_status'), false);
+  assert.equal(isCollectionTool('listSessions'), true);
+  assert.equal(isCollectionTool('get_all_records'), true);
+  const lister = (limit) => [{ ...best[0], name: 'fixture_list_notes', inputSchema: { type: 'object', properties: { limit } } }];
+  assert.equal(byId(scoreTools(lister({ type: 'integer', description: 'n' }), 'fixture')).paging.points, 0);
+  assert.equal(byId(scoreTools(lister({ type: 'integer', maximum: 50, description: 'n' }), 'fixture')).paging.points, 2);
+});
+
+test('cli score: --min outside 0-100 is a usage error, not a disabled gate', () => {
+  for (const min of ['-Infinity', '101', 'abc']) {
+    const run = spawnSync(process.execPath, [cli, 'score', '--min', min, '--', process.execPath, fixture, JSON.stringify(best)], { encoding: 'utf8' });
+    assert.equal(run.status, 1, min);
+    assert.match(run.stderr, /Usage/, min);
+  }
 });
