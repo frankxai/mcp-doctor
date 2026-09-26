@@ -63,6 +63,28 @@ npx @frankxai/mcp-doctor check --json -- node dist/server.js   # JSON report, ex
 
 On Windows, spawn `node <script>` directly rather than `npx <pkg>`, because `npx` resolves to `npx.cmd`.
 
+### Score a server against best practice
+
+`check` asks "does it work?". `score` asks "will an agent pick and use it well?". It grades the tool surface on seven criteria drawn from the MCP spec, Anthropic's [Writing effective tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents), and leading public servers. Each criterion is worth 2 points: all tools pass, half pass, or fewer.
+
+```bash
+npx @frankxai/mcp-doctor score -- node dist/server.js
+npx @frankxai/mcp-doctor score --json --min 80 -- node dist/server.js   # CI gate: exit 1 below 80%
+npx @frankxai/mcp-doctor score --prefix sis -- node dist/server.js      # brand prefix differs from server name
+```
+
+| Criterion | Full marks when |
+|---|---|
+| Annotations | every tool sets `readOnlyHint` and `openWorldHint`; writers also set `destructiveHint` and `idempotentHint` |
+| Titles | every tool has a human `title` |
+| Service prefix | names start with the service (`mcp-doctor` → `mcp_doctor_…`, or `--prefix`) |
+| Descriptions | 80+ characters: when to use it, what it returns, what it costs |
+| Bounded inputs | every property is described and bounded (`maxLength`, `enum`, `maximum`, `maxItems`, anchored bounded `pattern`); no-input tools set `additionalProperties: false` |
+| Output schema | `outputSchema` declared, so results can carry `structuredContent` |
+| Paging | list and search tools take a limit with a maximum, or a cursor |
+
+A server with no tools scores 0. Error quality, response size, auth and evals can't be seen from `tools/list`, so they are printed as a manual checklist. For reference, `@modelcontextprotocol/server-filesystem` scores 57%, and `mcp-doctor serve` scores 100%.
+
 ### As an MCP Server (Universal Agent Access)
 
 **The meta play:** mcp-doctor IS an MCP server. Any agent that supports MCP can self-diagnose.

@@ -107,8 +107,8 @@ export function servicePrefix(serverName: string): string {
   return trimmed || bare;
 }
 
-function namespaceCriterion(tools: ScoredTool[], serverName: string): Criterion {
-  const prefix = `${servicePrefix(serverName)}_`;
+function namespaceCriterion(tools: ScoredTool[], serverName: string, override?: string): Criterion {
+  const prefix = `${override ? words(override).join("_") : servicePrefix(serverName)}_`;
   const failing = tools.filter((tool) => !tool.name.startsWith(prefix)).map((tool) => tool.name);
   const firstSegments = new Set(tools.map((tool) => tool.name.split(/[_.-]/)[0]));
   const pts: 0 | 1 | 2 = failing.length === 0 ? 2 : tools.length > 1 && firstSegments.size === 1 ? 1 : 0;
@@ -159,7 +159,8 @@ function annotated(tool: ScoredTool): boolean {
   return hints.readOnlyHint === true || (hints.destructiveHint !== undefined && hints.idempotentHint !== undefined);
 }
 
-export function scoreTools(tools: ScoredTool[], serverName: string): ScoreReport {
+/** `prefix` overrides the derived service prefix when the brand is not the server name (starlight-sis ships sis_ tools). */
+export function scoreTools(tools: ScoredTool[], serverName: string, prefix?: string): ScoreReport {
   const every = () => true;
   if (tools.length === 0) {
     const advice = "The server lists no tools, so there is nothing an agent can use. Check it registers tools before connecting.";
@@ -173,7 +174,7 @@ export function scoreTools(tools: ScoredTool[], serverName: string): ScoreReport
       "Unannotated tools default to destructive and open-world, and some clients drop them. Set readOnlyHint on every tool."),
     criterion("titles", "Human-readable title", tools, every, (tool) => Boolean(tool.title ?? tool.annotations?.title),
       "Add a title so hosts can show a readable name."),
-    namespaceCriterion(tools, serverName),
+    namespaceCriterion(tools, serverName, prefix),
     criterion("descriptions", `Descriptions of ${MIN_DESCRIPTION}+ characters (when to use, what it returns, cost)`, tools, every,
       (tool) => (tool.description ?? "").trim().length >= MIN_DESCRIPTION,
       "Say when to use the tool, when not to, and how large or costly the response is."),
