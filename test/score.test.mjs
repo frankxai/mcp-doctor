@@ -141,6 +141,17 @@ test('paging: whole-word collection verbs, and the limit itself must be bounded'
   assert.equal(byId(scoreTools(lister({ type: 'integer', maximum: 50, description: 'n' }), 'fixture')).paging.points, 2);
 });
 
+test('--prefix grades names against the brand, not the server name', () => {
+  const sis = best.map((tool) => ({ ...tool, name: tool.name.replace('fixture_', 'sis_') }));
+  assert.equal(byId(scoreTools(sis, 'starlight-sis')).namespace.points, 1);
+  assert.equal(byId(scoreTools(sis, 'starlight-sis', 'sis')).namespace.points, 2);
+  const run = (extra) => spawnSync(process.execPath, [cli, 'score', '--json', ...extra, '--', process.execPath, fixture, JSON.stringify(sis)], { encoding: 'utf8' });
+  assert.equal(JSON.parse(run(['--prefix', 'sis']).stdout).percent, 100);
+  const bad = run(['--prefix', '../x']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /Usage/);
+});
+
 test('cli score: --min outside 0-100 is a usage error, not a disabled gate', () => {
   for (const min of ['-Infinity', '101', 'abc']) {
     const run = spawnSync(process.execPath, [cli, 'score', '--min', min, '--', process.execPath, fixture, JSON.stringify(best)], { encoding: 'utf8' });

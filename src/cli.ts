@@ -40,6 +40,7 @@ const HELP = `
     check --json -- <cmd>  Same, JSON report on stdout (for CI)
     score -- <cmd>     Grade a server's tool surface against best-in-class practice
     score --json --min 70 -- <cmd>  JSON report; exit 1 below the minimum percent
+    score --prefix sis -- <cmd>     Grade names against a brand prefix other than the server name
     help               Show this help message
 
   Examples:
@@ -211,8 +212,11 @@ async function runScore(args: string[]): Promise<number> {
   const flags = split === -1 ? args : args.slice(0, split);
   const minIndex = flags.indexOf("--min");
   const min = minIndex === -1 ? 0 : Number(flags[minIndex + 1]);
-  if (target.length === 0 || !Number.isFinite(min) || min < 0 || min > 100) {
-    console.error("  Usage: mcp-doctor score [--json] [--min <0-100>] -- <command> [args...]");
+  const prefixIndex = flags.indexOf("--prefix");
+  const prefix = prefixIndex === -1 ? undefined : flags[prefixIndex + 1];
+  const badPrefix = prefixIndex !== -1 && !/^[a-z][a-z0-9_-]{0,40}$/i.test(prefix ?? "");
+  if (target.length === 0 || !Number.isFinite(min) || min < 0 || min > 100 || badPrefix) {
+    console.error("  Usage: mcp-doctor score [--json] [--min <0-100>] [--prefix <service>] -- <command> [args...]");
     return 1;
   }
   let inspected;
@@ -224,7 +228,7 @@ async function runScore(args: string[]): Promise<number> {
     else console.error(`  Could not start the server: ${message}`);
     return 1;
   }
-  const report = scoreTools(inspected.tools, inspected.server?.name ?? target.join(" "));
+  const report = scoreTools(inspected.tools, inspected.server?.name ?? target.join(" "), prefix);
   if (flags.includes("--json")) {
     console.log(JSON.stringify({ server: inspected.server, toolCount: inspected.tools.length, ...report }, null, 2));
   } else {
