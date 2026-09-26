@@ -88,7 +88,8 @@ export function createDoctorServer(): McpServer {
           healthy: z.number(),
           broken: z.number(),
           missingEnv: z.number(),
-          healthScore: z.number(),
+          unchecked: z.number().describe("Remote servers, which the audit does not contact."),
+          healthScore: z.number().nullable().describe("0-100 over verified servers only; null when nothing could be verified."),
         }),
         servers: z.array(
           z.object({
@@ -114,8 +115,11 @@ export function createDoctorServer(): McpServer {
       const duplicates = findDuplicates(servers);
       const tiers = analyzeTiers(servers, health);
       const healthy = health.filter((r) => r.status === "healthy").length;
+      const unchecked = health.filter((r) => r.status === "unchecked").length;
+      const verified = servers.length - unchecked;
       const toRemove = tiers.filter((t) => t.recommendedTier === "remove").length;
-      const raw = ((healthy - duplicates.size - toRemove) / Math.max(servers.length, 1)) * 100;
+      // Unverified remote servers are neither healthy nor broken; counting them would rate a valid remote-only setup 0.
+      const raw = verified === 0 ? null : ((healthy - duplicates.size - toRemove) / verified) * 100;
       return structured({
         mode: quick ? "quick" : "full",
         summary: {
@@ -123,7 +127,8 @@ export function createDoctorServer(): McpServer {
           healthy,
           broken: health.filter((r) => r.status === "broken" || r.status === "missing-command").length,
           missingEnv: health.filter((r) => r.status === "missing-env").length,
-          healthScore: Math.min(100, Math.max(0, Math.round(raw))),
+          unchecked,
+          healthScore: raw === null ? null : Math.min(100, Math.max(0, Math.round(raw))),
         },
         servers: health.map((r) => ({
           name: r.server.name,

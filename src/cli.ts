@@ -211,8 +211,8 @@ async function runScore(args: string[]): Promise<number> {
   const flags = split === -1 ? args : args.slice(0, split);
   const minIndex = flags.indexOf("--min");
   const min = minIndex === -1 ? 0 : Number(flags[minIndex + 1]);
-  if (target.length === 0 || Number.isNaN(min)) {
-    console.error("  Usage: mcp-doctor score [--json] [--min <percent>] -- <command> [args...]");
+  if (target.length === 0 || !Number.isFinite(min) || min < 0 || min > 100) {
+    console.error("  Usage: mcp-doctor score [--json] [--min <0-100>] -- <command> [args...]");
     return 1;
   }
   let inspected;
@@ -242,7 +242,7 @@ async function runScore(args: string[]): Promise<number> {
     console.log("\n  Also check by hand:");
     for (const line of report.manual) console.log(`  - ${line}`);
   }
-  return report.percent < min ? 1 : 0;
+  return inspected.tools.length === 0 || report.percent < min ? 1 : 0;
 }
 
 async function runCheck(args: string[]): Promise<number> {

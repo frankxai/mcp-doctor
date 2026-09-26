@@ -19,6 +19,7 @@ writeFileSync(
     mcpServers: {
       alpha: { type: 'stdio', command: 'node', args: ['alpha.js'], env: { API_TOKEN: 'sk-live-should-never-leak' } },
       beta: { type: 'streamable-http', url: 'https://example.com/mcp?key=secret-in-url' },
+      leaky: { type: 'stdio', command: 'node', args: [path.join(here, 'fixtures', 'leaky-server.mjs'), '--token=sentinel-arg-secret'] },
     },
   }),
 );
@@ -55,13 +56,50 @@ test('audit returns structured health for every configured server, without secre
   try {
     const { structuredContent: audit } = await call(client, 'mcp_doctor_audit', { quick: true });
     assert.equal(audit.mode, 'quick');
-    assert.deepEqual(audit.servers.map((s) => s.name).sort(), ['alpha', 'beta']);
-    assert.equal(audit.summary.servers, 2);
+    assert.deepEqual(audit.servers.map((s) => s.name).sort(), ['alpha', 'beta', 'leaky']);
+    assert.equal(audit.summary.servers, 3);
+    assert.equal(audit.summary.unchecked, 1);
     assert.ok(audit.summary.healthScore >= 0 && audit.summary.healthScore <= 100);
     assert.deepEqual(audit.misplaced.map((m) => m.serverNames), [['lost']]);
     const text = JSON.stringify(audit);
     assert.ok(!text.includes('sk-live-should-never-leak'), 'env values stay out');
     assert.ok(!text.includes('secret-in-url'), 'url query strings stay out');
+  } finally {
+    await client.close();
+  }
+});
+
+test('full audit starts servers, yet a token a failing server echoes from its args never reaches the agent', async () => {
+  const client = await connect();
+  try {
+    const { structuredContent: audit } = await call(client, 'mcp_doctor_audit', { quick: false });
+    const leaky = audit.servers.find((s) => s.name === 'leaky');
+    assert.equal(leaky.status, 'broken', 'the fixture really ran and failed');
+    const text = JSON.stringify(audit);
+    assert.ok(!text.includes('sentinel-arg-secret'), 'args secrets stay out of status and tier reasons');
+    assert.ok(!text.includes('sk-live-should-never-leak'));
+  } finally {
+    await client.close();
+  }
+});
+
+test('a remote-only setup is not rated 0: nothing was verified, so the score is null', async () => {
+  const remoteHome = mkdtempSync(path.join(tmpdir(), 'mcp-doctor-remote-'));
+  writeFileSync(path.join(remoteHome, '.claude.json'), JSON.stringify({ mcpServers: { r: { type: 'streamable-http', url: 'https://example.com/mcp' } } }));
+  const client = new Client({ name: 'serve-test', version: '0.0.0' });
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [cli, 'serve'],
+      env: { ...env, HOME: remoteHome, USERPROFILE: remoteHome },
+      cwd: remoteHome,
+      stderr: 'pipe',
+    }),
+  );
+  try {
+    const { structuredContent: audit } = await call(client, 'mcp_doctor_audit', {});
+    assert.equal(audit.summary.unchecked, 1);
+    assert.equal(audit.summary.healthScore, null);
   } finally {
     await client.close();
   }
