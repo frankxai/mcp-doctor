@@ -21,7 +21,8 @@ import {
   formatMisplacedConfigs,
 } from "./reporter/format.js";
 import { startMcpServer } from "./mcp-server.js";
-import { checkServer } from "./checker/check-server.js";
+import { checkServer, inspectServer } from "./checker/check-server.js";
+import { scoreTools } from "./checker/score.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
 
 const HELP = `
@@ -37,6 +38,9 @@ const HELP = `
     serve              Run as an MCP server (for agent self-diagnosis)
     check -- <cmd>     Spawn a stdio MCP server, lint its tools, exit 1 on violations
     check --json -- <cmd>  Same, JSON report on stdout (for CI)
+    score -- <cmd>     Grade a server's tool surface against best-in-class practice
+    score --json --min 70 -- <cmd>  JSON report; exit 1 below the minimum percent
+    score --prefix sis -- <cmd>     Grade names against a brand prefix other than the server name
     help               Show this help message
 
   Examples:
@@ -202,6 +206,49 @@ function runAgents() {
   console.log("");
 }
 
+async function runScore(args: string[]): Promise<number> {
+  const split = args.indexOf("--");
+  const target = split === -1 ? [] : args.slice(split + 1);
+  const flags = split === -1 ? args : args.slice(0, split);
+  const minIndex = flags.indexOf("--min");
+  const min = minIndex === -1 ? 0 : Number(flags[minIndex + 1]);
+  const prefixIndex = flags.indexOf("--prefix");
+  const prefix = prefixIndex === -1 ? undefined : flags[prefixIndex + 1];
+  const badPrefix = prefixIndex !== -1 && !/^[a-z][a-z0-9_-]{0,40}$/i.test(prefix ?? "");
+  if (target.length === 0 || !Number.isFinite(min) || min < 0 || min > 100 || badPrefix) {
+    console.error("  Usage: mcp-doctor score [--json] [--min <0-100>] [--prefix <service>] -- <command> [args...]");
+    return 1;
+  }
+  let inspected;
+  try {
+    inspected = await inspectServer(target[0], target.slice(1));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (flags.includes("--json")) console.log(JSON.stringify({ error: message }));
+    else console.error(`  Could not start the server: ${message}`);
+    return 1;
+  }
+  const report = scoreTools(inspected.tools, inspected.server?.name ?? target.join(" "), prefix);
+  if (flags.includes("--json")) {
+    console.log(JSON.stringify({ server: inspected.server, toolCount: inspected.tools.length, ...report }, null, 2));
+  } else {
+    const label = inspected.server ? `${inspected.server.name}@${inspected.server.version}` : target.join(" ");
+    console.log(`  ${label} — ${inspected.tools.length} tool(s) — score ${report.points}/${report.max} (${report.percent}%)\n`);
+    for (const item of report.criteria) {
+      const mark = item.points === 2 ? "\x1b[32m●●\x1b[0m" : item.points === 1 ? "\x1b[33m●○\x1b[0m" : "\x1b[31m○○\x1b[0m";
+      console.log(`  ${mark} ${item.label}`);
+      if (item.points < 2) {
+        const shown = item.failing.slice(0, 5).join(", ");
+        console.log(`       ${item.failing.length} tool(s): ${shown}${item.failing.length > 5 ? ", ..." : ""}`);
+        console.log(`       \x1b[90m${item.advice}\x1b[0m`);
+      }
+    }
+    console.log("\n  Also check by hand:");
+    for (const line of report.manual) console.log(`  - ${line}`);
+  }
+  return inspected.tools.length === 0 || report.percent < min ? 1 : 0;
+}
+
 async function runCheck(args: string[]): Promise<number> {
   const split = args.indexOf("--");
   const target = split === -1 ? [] : args.slice(split + 1);
@@ -236,6 +283,9 @@ async function main() {
     case "agents":
       runAgents();
       break;
+    case "score":
+      process.exitCode = await runScore(args.slice(1));
+      return;
     case "check":
       process.exitCode = await runCheck(args.slice(1));
       return;

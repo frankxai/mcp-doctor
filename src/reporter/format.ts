@@ -69,7 +69,7 @@ export function formatHealthReport(results: HealthResult[]): string {
     const scope = dim(`[${result.server.scope}]`);
     const name = result.server.name;
     const ms = result.responseTimeMs ? dim(` ${result.responseTimeMs}ms`) : "";
-    const msg = result.status !== "healthy" ? ` ${dim(result.message)}` : "";
+    const msg = result.status !== "healthy" ? ` ${dim(result.message + (result.detail ? `: ${result.detail}` : ""))}` : "";
 
     lines.push(`  ${icon} ${name} ${scope}${ms}${msg}`);
   }

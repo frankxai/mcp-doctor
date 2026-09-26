@@ -57,8 +57,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 const STDERR_TAIL = 2048;
 
-export async function checkServer(command: string, args: string[], timeoutMs = 15000): Promise<CheckReport> {
-  const client = new Client({ name: "mcp-doctor-check", version: VERSION });
+export interface InspectedServer {
+  server?: { name: string; version: string };
+  tools: Awaited<ReturnType<Client["listTools"]>>["tools"];
+}
+
+/** Spawn a stdio server, list its tools, close it. Errors carry the server's stderr tail. */
+export async function inspectServer(command: string, args: string[], timeoutMs = 15000): Promise<InspectedServer> {
+  const client = new Client({ name: "mcp-doctor", version: VERSION });
   const transport = new StdioClientTransport({ command, args, stderr: "pipe" });
   let stderr = "";
   transport.stderr?.on("data", (chunk: Buffer) => {
@@ -68,24 +74,22 @@ export async function checkServer(command: string, args: string[], timeoutMs = 1
     await withTimeout(client.connect(transport), timeoutMs);
     const { tools } = await withTimeout(client.listTools(), timeoutMs);
     const info = client.getServerVersion();
-    const issues = lintTools(tools);
-    return {
-      ok: issues.length === 0,
-      server: info ? { name: info.name, version: info.version } : undefined,
-      toolCount: tools.length,
-      tools: tools.map((tool) => tool.name),
-      issues,
-    };
+    return { server: info ? { name: info.name, version: info.version } : undefined, tools };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const tail = stderr.trim();
-    return {
-      ok: false,
-      toolCount: 0,
-      tools: [],
-      issues: [{ rule: "connect", message: tail ? `${reason}\nServer stderr:\n${tail}` : reason }],
-    };
+    throw new Error(tail ? `${reason}\nServer stderr:\n${tail}` : reason);
   } finally {
     await client.close().catch(() => undefined);
+  }
+}
+
+export async function checkServer(command: string, args: string[], timeoutMs = 15000): Promise<CheckReport> {
+  try {
+    const { server, tools } = await inspectServer(command, args, timeoutMs);
+    const issues = lintTools(tools);
+    return { ok: issues.length === 0, server, toolCount: tools.length, tools: tools.map((tool) => tool.name), issues };
+  } catch (error) {
+    return { ok: false, toolCount: 0, tools: [], issues: [{ rule: "connect", message: error instanceof Error ? error.message : String(error) }] };
   }
 }
