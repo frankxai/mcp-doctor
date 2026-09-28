@@ -18,7 +18,8 @@ MCP Doctor audits MCP server configs across Claude Code, Cursor, Cline, Windsurf
 - `src/scanner/` — reads `~/.claude.json` and per-agent config locations
 - `src/analyzer/presets.ts`, `src/analyzer/tier-optimizer.ts` — preset packs + tier scoring
 - `src/reporter/` — health report / score formatting
-- Build: `tsc` (`pnpm run build` → `dist/`); no test suite currently in `package.json` scripts
+- `src/checker/check-server.ts` — `check` command: spawn a stdio server, lint tools against the estate agent-native contract
+- Build: `tsc` (`pnpm run build` → `dist/`); tests: `pnpm test` (builds, then `node --test test/*.test.mjs`)
 
 ## Agent Rules
 

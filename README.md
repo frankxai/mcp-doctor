@@ -42,6 +42,27 @@ npx @frankxai/mcp-doctor recommend
 npx @frankxai/mcp-doctor recommend ai-architect
 ```
 
+### For CI (check any server you build)
+
+`check` spawns a stdio MCP server, lists its tools and lints them. It needs no config file, so it works in CI on a server you are building.
+
+```bash
+npx @frankxai/mcp-doctor check -- node dist/server.js
+#   PASS my-server@1.2.0 — 12 tool(s)
+
+npx @frankxai/mcp-doctor check --json -- node dist/server.js   # JSON report, exit 1 on any issue
+```
+
+| Rule | Fails when |
+|---|---|
+| `connect` | The server does not start or answer `initialize` + `tools/list` within 15 s (its stderr is included) |
+| `name` | A tool name is not `^[a-z][a-z0-9_]{0,63}$` |
+| `duplicate` | Two tools share a name |
+| `description` | A description is missing or under 20 characters |
+| `schema` | `inputSchema.type` is not `"object"` |
+
+On Windows, spawn `node <script>` directly rather than `npx <pkg>`, because `npx` resolves to `npx.cmd`.
+
 ### As an MCP Server (Universal Agent Access)
 
 **The meta play:** mcp-doctor IS an MCP server. Any agent that supports MCP can self-diagnose.
