@@ -1,0 +1,117 @@
+name: Npm release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact stable manifest version
+        required: true
+        type: string
+      expected_sha:
+        description: Full accepted main commit to release
+        required: true
+        type: string
+      operation:
+        description: Verify only or stage with protected npm publisher
+        required: true
+        type: choice
+        default: verify
+        options: [verify, stage]
+permissions:
+  contents: read
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_SHA: ${{ inputs.expected_sha }}
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node .github/scripts/release-check.mjs source
+  verify:
+    needs: source
+    uses: ./.github/workflows/health-check.yml
+  artifact:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installed-audit-ubuntu-latest-node-24
+          path: release
+      - run: node .github/scripts/release-check.mjs artifact release
+      - run: node .github/scripts/release-check.mjs registry release
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: verified-release
+          path: |
+            release/
+            registry-release-state.json
+          retention-days: 7
+          if-no-files-found: error
+  stage:
+    needs: artifact
+    if: inputs.operation == 'stage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-publish
+    env:
+      NPM_CONFIG_USERCONFIG: /dev/null
+      NPM_CONFIG_GLOBALCONFIG: /dev/null
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm install --global npm@11.15.0 --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-release
+          path: verified
+      - run: node .github/scripts/release-check.mjs artifact verified/release
+      - run: node .github/scripts/release-check.mjs registry verified/release
+      - name: Stage the actual verified tarball with OIDC provenance
+        shell: bash
+        run: |
+          test -z "${NODE_AUTH_TOKEN:-}"
+          test -z "${NPM_TOKEN:-}"
+          state=$(node -p 'JSON.parse(require("node:fs").readFileSync("registry-release-state.json", "utf8")).state')
+          if [ "$state" = "matching" ]; then
+            echo "Exact version is already published with matching integrity; no registry mutation."
+            exit 0
+          fi
+          test "$state" = "missing"
+          npm stage publish "verified/release/frankxai-mcp-doctor-${RELEASE_VERSION}.tgz" --access public --provenance --ignore-scripts --json > npm-stage-receipt.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: registry-stage-result
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            registry-release-state.json
+            npm-stage-receipt.json

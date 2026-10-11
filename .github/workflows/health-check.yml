@@ -1,6 +1,7 @@
 name: Protocol health
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -10,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: protocol-health-${{ github.ref }}
+  group: protocol-health-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -88,6 +89,12 @@ jobs:
             entries = $paths
           }
           $proof | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 'installed-audit-proof.json'
+          $env:RELEASE_SHA = $proof.head
+          $env:RELEASE_VERSION = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $env:RELEASE_OS = '${{ matrix.os }}'
+          $env:RELEASE_NODE = '${{ matrix.node }}'
+          node .github/scripts/release-check.mjs artifact .
+          if ($LASTEXITCODE -ne 0) { throw "Release artifact boundary failed" }
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installed-audit-${{ matrix.os }}-node-${{ matrix.node }}
