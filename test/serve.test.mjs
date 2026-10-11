@@ -58,8 +58,8 @@ test('audit returns structured health for every configured server, without secre
     assert.equal(audit.mode, 'quick');
     assert.deepEqual(audit.servers.map((s) => s.name).sort(), ['alpha', 'beta', 'leaky']);
     assert.equal(audit.summary.servers, 3);
-    assert.equal(audit.summary.unchecked, 1);
-    assert.ok(audit.summary.healthScore >= 0 && audit.summary.healthScore <= 100);
+    assert.equal(audit.summary.unchecked, 3);
+    assert.equal(audit.summary.healthScore, null);
     assert.deepEqual(audit.misplaced.map((m) => m.serverNames), [['lost']]);
     const text = JSON.stringify(audit);
     assert.ok(!text.includes('sk-live-should-never-leak'), 'env values stay out');

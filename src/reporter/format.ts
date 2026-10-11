@@ -75,8 +75,10 @@ export function formatHealthReport(results: HealthResult[]): string {
   }
 
   lines.push("");
+  const totalBroken = byStatus.broken.length + byStatus["missing-command"].length;
+  const timeoutText = byStatus.timeout.length > 0 ? `  ${yellow(`${byStatus.timeout.length} timed out`)}` : "";
   lines.push(
-    `  ${green(`${byStatus.healthy.length} healthy`)}  ${red(`${byStatus.broken.length + byStatus["missing-command"].length} broken`)}  ${yellow(`${byStatus["missing-env"].length} missing config`)}  ${dim(`${byStatus.unchecked.length} skipped`)}`
+    `  ${green(`${byStatus.healthy.length} healthy`)}  ${red(`${totalBroken} broken`)}${timeoutText}  ${yellow(`${byStatus["missing-env"].length} missing config`)}  ${dim(`${byStatus.unchecked.length} skipped`)}`
   );
 
   return lines.join("\n");
@@ -157,20 +159,34 @@ export function formatSummary(
   serverCount: number,
   healthyCount: number,
   duplicateCount: number,
-  removeCount: number
+  removeCount: number,
+  verifiedCount?: number
 ): string {
-  const score = Math.round(
-    ((healthyCount - duplicateCount - removeCount) / Math.max(serverCount, 1)) * 100
-  );
+  const verified = verifiedCount ?? serverCount;
+  const score =
+    verified === 0
+      ? null
+      : Math.round(
+          Math.min(100, Math.max(0, (healthyCount / verified) * 100))
+        );
 
-  const scoreColor = score >= 80 ? green : score >= 50 ? yellow : red;
+  const scoreText =
+    score === null
+      ? dim("unverified (no runtime probes)")
+      : score >= 80
+      ? green(`${score}/100`)
+      : score >= 50
+      ? yellow(`${score}/100`)
+      : red(`${score}/100`);
 
   return [
     bold("\n  SCORE"),
     "  " + "─".repeat(50),
-    `  MCP Health Score: ${scoreColor(`${score}/100`)}`,
+    `  MCP Health Score: ${scoreText}`,
     "",
-    dim(`  ${serverCount} total servers | ${healthyCount} healthy | ${duplicateCount} duplicates | ${removeCount} should remove`),
+    dim(
+      `  ${serverCount} total servers | ${healthyCount} healthy | ${duplicateCount} duplicates | ${removeCount} should remove`
+    ),
     "",
   ].join("\n");
 }

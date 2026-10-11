@@ -88,8 +88,8 @@ export function createDoctorServer(): McpServer {
           healthy: z.number(),
           broken: z.number(),
           missingEnv: z.number(),
-          unchecked: z.number().describe("Remote servers, which the audit does not contact."),
-          healthScore: z.number().nullable().describe("0-100 over verified servers only; null when nothing could be verified."),
+          unchecked: z.number().describe("Servers whose runtime is untested, including valid quick-mode configurations and remote transports."),
+          healthScore: z.number().nullable().describe("Percentage of attempted stdio probes that verified initialization and ping; null for quick mode or no runtime probes."),
         }),
         servers: z.array(
           z.object({
@@ -107,7 +107,7 @@ export function createDoctorServer(): McpServer {
           z.object({ name: z.string(), tier: z.enum(["always-on", "on-demand", "remove"]), reason: z.string() }),
         ),
       },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async ({ quick, project }) => {
       const servers = scanAllServers(project);
@@ -116,16 +116,16 @@ export function createDoctorServer(): McpServer {
       const tiers = analyzeTiers(servers, health);
       const healthy = health.filter((r) => r.status === "healthy").length;
       const unchecked = health.filter((r) => r.status === "unchecked").length;
-      const verified = servers.length - unchecked;
-      const toRemove = tiers.filter((t) => t.recommendedTier === "remove").length;
-      // Unverified remote servers are neither healthy nor broken; counting them would rate a valid remote-only setup 0.
-      const raw = verified === 0 ? null : ((healthy - duplicates.size - toRemove) / verified) * 100;
+      const verified = quick ? 0 : health.filter((r) => r.responseTimeMs !== undefined).length;
+      
+      // Configuration findings and tier advice are reported separately from protocol success.
+      const raw = verified === 0 ? null : (healthy / verified) * 100;
       return structured({
         mode: quick ? "quick" : "full",
         summary: {
           servers: servers.length,
           healthy,
-          broken: health.filter((r) => r.status === "broken" || r.status === "missing-command").length,
+          broken: health.filter((r) => r.status === "broken" || r.status === "missing-command" || r.status === "timeout").length,
           missingEnv: health.filter((r) => r.status === "missing-env").length,
           unchecked,
           healthScore: raw === null ? null : Math.min(100, Math.max(0, Math.round(raw))),

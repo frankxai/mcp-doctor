@@ -8,6 +8,8 @@ import {
 } from "./scanner/config-reader.js";
 import {
   checkAllServers,
+  redactArgSecrets,
+  redactSecrets,
 } from "./scanner/health-checker.js";
 import { analyzeTiers, generateOnDemandCommands } from "./analyzer/tier-optimizer.js";
 import { listPresets, getPreset, generateInstallCommands, PRESETS } from "./analyzer/presets.js";
@@ -92,6 +94,10 @@ async function runAudit(args: string[]) {
   // Generate on-demand commands for servers that should move
   const onDemandServers = toOnDemand.map((t) => t.server);
   const onDemandCommands = generateOnDemandCommands(onDemandServers);
+  for (const server of onDemandServers) {
+    const command = onDemandCommands.get(server.name);
+    if (command) onDemandCommands.set(server.name, redactArgSecrets(redactSecrets(command, server.config.env ?? {}), server.config.args ?? []));
+  }
 
   // Misplaced config check (the #1 MCP misconfiguration)
   const misplaced = findMisplacedConfigs();
@@ -103,12 +109,15 @@ async function runAudit(args: string[]) {
   console.log(formatHealthReport(healthResults));
   console.log(formatDuplicates(duplicates));
   console.log(formatTierRecommendations(tiers));
+
+  const verifiedCount = quick ? 0 : healthResults.filter((r) => r.responseTimeMs !== undefined).length;
   console.log(
     formatSummary(
       servers.length,
       healthResults.filter((r) => r.status === "healthy").length,
       duplicates.size,
-      toRemove.length
+      toRemove.length,
+      verifiedCount
     )
   );
   console.log(formatFixCommands(toRemove, onDemandCommands));

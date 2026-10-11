@@ -1,0 +1,98 @@
+name: Protocol health
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-health-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Protocol health (${{ matrix.os }} / Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['18', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: '9.15.9'
+          run_install: false
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build declared package
+        run: npm run build
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Test compiled workspace
+        shell: pwsh
+        run: |
+          $testFiles = @(Get-ChildItem -LiteralPath test -Filter "*.test.mjs" -File | ForEach-Object { $_.FullName })
+          if ($testFiles.Count -eq 0) { throw "No behavioral tests found" }
+          node --test @testFiles
+          if ($LASTEXITCODE -ne 0) { throw "Workspace behavioral tests failed" }
+      - name: Verify actual installed tarball
+        shell: pwsh
+        run: |
+          $packOutput = npm pack --ignore-scripts --json | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Package packing failed" }
+          $records = @($packOutput | ConvertFrom-Json)
+          if ($records.Count -ne 1) { throw "Expected exactly one package" }
+          $packed = $records[0]
+          $paths = @($packed.files | ForEach-Object { $_.path })
+          foreach ($file in $paths) {
+            if ($file -notmatch '^(dist/|presets/|README\.md$|LICENSE$|package\.json$)') { throw ("Unexpected tarball entry: " + $file) }
+          }
+          foreach ($required in @('dist/index.js', 'dist/cli.js', 'dist/mcp-server.js', 'package.json', 'LICENSE')) {
+            if ($required -notin $paths) { throw ("Missing package entry: " + $required) }
+          }
+          $tarballPath = (Resolve-Path -LiteralPath $packed.filename).Path
+          $consumerPath = Join-Path $env:RUNNER_TEMP "mcp-doctor-consumer"
+          New-Item -ItemType Directory -Path $consumerPath -Force | Out-Null
+          Push-Location $consumerPath
+          try {
+            npm init -y
+            if ($LASTEXITCODE -ne 0) { throw "Consumer initialization failed" }
+            npm install --ignore-scripts --no-package-lock --no-audit --no-fund $tarballPath
+            if ($LASTEXITCODE -ne 0) { throw "Actual tarball install failed" }
+          } finally { Pop-Location }
+          $env:MCP_DOCTOR_CONSUMER_ROOT = Join-Path $consumerPath 'node_modules/@frankxai/mcp-doctor'
+          node --test test/health.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Installed audit consumers failed" }
+          $proof = [ordered]@{
+            head = '${{ github.event.pull_request.head.sha || github.sha }}'
+            os = '${{ matrix.os }}'
+            node = '${{ matrix.node }}'
+            package = $packed.id
+            tarball = $packed.filename
+            integrity = $packed.integrity
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarballPath).Hash.ToLowerInvariant()
+            entries = $paths
+          }
+          $proof | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 'installed-audit-proof.json'
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: installed-audit-${{ matrix.os }}-node-${{ matrix.node }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            frankxai-mcp-doctor-*.tgz
+            installed-audit-proof.json

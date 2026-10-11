@@ -1,19 +1,11 @@
 # MCP Doctor
 
-**Diagnose, optimize, and manage MCP servers across all coding agents.**
+**Diagnose, optimize, and manage MCP servers across coding agents.**
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/@frankxai/mcp-doctor.svg)](https://www.npmjs.com/package/@frankxai/mcp-doctor)
 
 ---
-
-## The Problem
-
-You install a few MCP servers for Claude Code. Then a few more. Plugins auto-install some. Claude.ai connectors add others silently. Before you know it, you have **18 MCP servers** loading every session — half of them broken, duplicated, or unconfigured.
-
-Every broken server adds seconds to your startup. Every misconfigured one wastes tokens when Claude tries and fails to use it. And there's no tooling to tell you what's wrong.
-
-**MCP Doctor fixes that.**
 
 ## Quick Start
 
@@ -21,17 +13,17 @@ Every broken server adds seconds to your startup. Every misconfigured one wastes
 npx @frankxai/mcp-doctor audit
 ```
 
-That's it. One command scans your entire Claude Code configuration, checks every MCP server across all scopes, and gives you a full health report with actionable fix commands.
+One command scans your Claude Code configuration, checks every MCP server across all scopes, and gives you a health report with fix commands.
 
 ## Usage
 
 ### For Humans (CLI)
 
 ```bash
-# Full health check — spawns each server, tests MCP handshake
+# Full health check — spawns each server, verifies MCP handshake
 npx @frankxai/mcp-doctor audit
 
-# Quick mode — config-only, instant (no spawning)
+# Quick mode — config-only validation (instant, no spawning)
 npx @frankxai/mcp-doctor audit --quick
 
 # Filter to a specific project
@@ -87,7 +79,7 @@ A server with no tools scores 0. Error quality, response size, auth and evals ca
 
 ### As an MCP Server (Universal Agent Access)
 
-**The meta play:** mcp-doctor IS an MCP server. Any agent that supports MCP can self-diagnose.
+mcp-doctor runs as an MCP server so an agent can diagnose its own MCP setup.
 
 ```bash
 # Install globally (recommended — avoids cold-start timeouts)
@@ -152,7 +144,7 @@ const tiers = analyzeTiers(servers, health);
 
 ### Multi-Agent Support
 
-Detects and reads MCP configs from all major coding agents:
+Detects and reads MCP configs from major coding agents:
 
 ```bash
 npx @frankxai/mcp-doctor agents
@@ -172,7 +164,7 @@ Config differences are normalized automatically (VS Code's `servers` key, Windsu
 
 ### Misplaced Config Detection
 
-The **#1 MCP misconfiguration**: putting `mcpServers` in `settings.json` instead of `.claude.json`. Claude Code silently ignores them. MCP Doctor catches this:
+Claude Code ignores `mcpServers` in `settings.json` files; they belong in `~/.claude.json`. MCP Doctor detects misplaced configs:
 
 ```
   ⚠ MISPLACED MCP CONFIGS (CRITICAL)
@@ -196,10 +188,10 @@ The **#1 MCP misconfiguration**: putting `mcpServers` in `settings.json` instead
 
 Scans `~/.claude.json` across all project scopes and checks:
 
-- Server connectivity (spawns each stdio server and tests the MCP handshake)
+- Server connectivity (spawns each stdio server and verifies MCP initialize + ping handshake)
 - Missing or placeholder environment variables (`YOUR_API_KEY_HERE`)
 - Duplicate registrations across scopes (user, project-local, .mcp.json)
-- Command availability in PATH
+- Command resolution and startup failures during full probes
 
 ```
   HEALTH REPORT
@@ -209,7 +201,7 @@ Scans `~/.claude.json` across all project scopes and checks:
   ✓ nanobanana [project-local]
   ⚠ grok [project-local]    XAI_API_KEY not configured
   ⚠ replicate [project-local] REPLICATE_API_TOKEN not configured
-  ✗ my-server [project-local] Exited with code 1: Module not found
+  ✗ my-server [project-local] Exited before handshake
 
   4 healthy  1 broken  2 missing config  0 skipped
 ```
@@ -232,7 +224,7 @@ Finds servers registered multiple times across different scopes:
 
 ### Tier Recommendations
 
-Categorizes every server into **always-on**, **on-demand**, or **remove**:
+Categorizes servers into **always-on**, **on-demand**, or **remove**:
 
 ```
   TIER RECOMMENDATIONS
@@ -270,12 +262,12 @@ Generates copy-paste-ready commands to clean up your setup:
 
 ### Health Score
 
-A single number that tells you how clean your MCP setup is:
+Seven successful protocol probes out of eight attempted probes score 88/100. Quick mode and setups without runtime probes are unverified:
 
 ```
   SCORE
   ──────────────────────────────────────────────────
-  MCP Health Score: 85/100
+  MCP Health Score: 88/100
 
   8 total servers | 7 healthy | 0 duplicates | 1 should remove
 ```
@@ -300,12 +292,11 @@ Pre-configured MCP stacks for common workflows. Each pack specifies which server
 
 ## Security
 
-MCP Doctor reads your `~/.claude.json` which contains API keys and tokens. Here's how we protect them:
+MCP Doctor reads `~/.claude.json` which contains API keys and tokens. Here is how they are protected:
 
-- **Secret redaction**: All output passes through `redactSecrets()` — known env values and 9 common API key regex patterns are replaced with `[REDACTED:KEY_NAME]`
-- **Safe env inheritance**: Spawned processes only receive safe system vars (`PATH`, `HOME`, etc.) + the server's own declared env — not your full `process.env`
-- **No network access**: MCP Doctor never sends data anywhere. It reads local config and spawns local processes only
-- **Zero dependencies**: No supply chain risk from transitive dependencies
+- **Secret redaction**: Output passes through `redactSecrets()` and `redactArgSecrets()` — known env values, command-line arguments, and API key regex patterns are replaced with `[REDACTED:KEY_NAME]`
+- **Safe env inheritance**: Spawned processes only receive safe system vars (`PATH`, `HOME`, etc.) + the server's own declared env — `NODE_OPTIONS` and `NODE_PATH` are not inherited
+- **Execution boundary**: Remote servers are skipped. Commands started by full audits can use their own network access.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
@@ -319,15 +310,15 @@ MCP Doctor reads your Claude Code configuration from `~/.claude.json`, which sto
 
 For each server found, it:
 - Validates the configuration structure
-- Checks that required commands exist in PATH
+- (Full mode) Resolves commands through the SDK transport and reports startup failures
 - Detects placeholder environment variables
 - Scans `settings.json` files for misplaced MCP configs
-- (Full mode) Spawns the process and sends an MCP `initialize` handshake
+- (Full mode) Spawns the process and performs an MCP `initialize` + `ping` handshake
 - Cross-references against a database of known MCP servers for tier recommendations
 
 ## MCP Scope Explained
 
-If you're confused about where your servers are configured, here's the hierarchy:
+The scope hierarchy in Claude Code:
 
 ```
 ~/.claude.json
@@ -341,16 +332,9 @@ If you're confused about where your servers are configured, here's the hierarchy
 /path/to/project/.mcp.json     ← Shared project scope (committed to git)
 ```
 
-> **Common mistake**: Putting `mcpServers` in `~/.claude/settings.json` — Claude Code ignores them there. MCP Doctor detects this and tells you how to fix it.
-
 ## Contributing
 
-Contributions welcome. Some ideas:
-
-- **New preset packs** — Add presets for your workflow in `src/analyzer/presets.ts`
-- **Known server database** — Expand the tier-optimizer's knowledge of common MCP servers
-- **Auto-fix** — Apply recommendations automatically with `--fix` flag
-- **Cross-agent sync** — Detect servers in one agent and offer to add to another
+Contributions welcome.
 
 ```bash
 git clone https://github.com/frankxai/mcp-doctor
@@ -360,12 +344,38 @@ pnpm run build
 node dist/cli.js audit --quick
 ```
 
-## Why This Exists
-
-I had 18 MCP servers loading every Claude Code session. Eight were broken, duplicated, or unconfigured. Five had placeholder API keys. Startup was slow, tools failed silently, and there was no way to know what was wrong without manually inspecting a 1000-line JSON config.
-
-So I built a doctor.
-
 ## License
 
 MIT
+
+
+## Protocol health and configuration checks
+
+The audit --quick command validates configuration and starts no server processes.
+A valid configuration is unchecked, and its runtime score is unverified. Missing
+commands and placeholder environment values remain visible configuration findings.
+Remote servers are also untested by this audit.
+
+Full stdio audits use the installed official MCP SDK to initialize and perform a
+ping. Only a successful protocol exchange is healthy; a process staying alive or
+exiting cleanly is insufficient. Resources-only servers do not need to implement
+tools/list. The reported score is the percentage of attempted stdio probes that
+succeeded. Duplicates, configuration defects and removal advice are reported
+separately, and no attempted probes means no numeric score.
+
+Initialization and RPCs share one probe deadline. Shutdown uses the SDK's owned
+child handle and termination escalation, followed by an exit check, with a separate
+bounded cleanup allowance. Failed cleanup cannot produce a healthy result.
+Parent NODE_OPTIONS, NODE_PATH and credentials are not inherited by default;
+explicit server environment values remain caller-controlled. SDK output buffering
+is limited to 1 MiB. Diagnostics retain at most 2 KiB of redacted complete stderr
+lines; oversized lines are omitted.
+
+Full audit runs third-party commands from the selected configuration. Use it when
+you intend to execute those commands. Suggested CLI commands redact known
+credentials, so supply credential placeholders privately before using them.
+
+The protocol lifecycle follows the installed SDK's compatibility support. These
+checks do not certify every transport or modern stateless MCP revision. CI verifies
+the declared minimum Node version and Node 24 on Windows and Linux, including the
+audit API, CLI and MCP tools from an actual installed tarball.
