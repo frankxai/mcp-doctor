@@ -73,8 +73,6 @@ jobs:
     timeout-minutes: 10
     environment: npm-publish
     env:
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/mcp-doctor-empty-user.npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/mcp-doctor-empty-global.npmrc
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
     permissions:
       contents: read
@@ -90,8 +88,12 @@ jobs:
       - name: Use isolated tokenless npm configuration
         shell: bash
         run: |
-          : > "$NPM_CONFIG_USERCONFIG"
-          : > "$NPM_CONFIG_GLOBALCONFIG"
+          user_config="$RUNNER_TEMP/mcp-doctor-empty-user.npmrc"
+          global_config="$RUNNER_TEMP/mcp-doctor-empty-global.npmrc"
+          : > "$user_config"
+          : > "$global_config"
+          printf 'NPM_CONFIG_USERCONFIG=%s\n' "$user_config" >> "$GITHUB_ENV"
+          printf 'NPM_CONFIG_GLOBALCONFIG=%s\n' "$global_config" >> "$GITHUB_ENV"
           test -z "${NODE_AUTH_TOKEN:-}"
           test -z "${NPM_TOKEN:-}"
       - run: npm install --global npm@11.15.0 --ignore-scripts --no-audit --no-fund
