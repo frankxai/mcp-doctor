@@ -107,7 +107,7 @@ export function createDoctorServer(): McpServer {
           z.object({ name: z.string(), tier: z.enum(["always-on", "on-demand", "remove"]), reason: z.string() }),
         ),
       },
-      annotations: { readOnlyHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async ({ quick, project }) => {
       const servers = scanAllServers(project);

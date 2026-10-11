@@ -197,6 +197,9 @@ test("actual MCP audit keeps quick configuration errors unrated and full runtime
   const client = new Client({ name: "health-test", version: "0.0.0" });
   try {
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [cli, "serve"], env: envFor(home), cwd: home, stderr: "pipe" }));
+    const { tools } = await client.listTools();
+    const auditTool = tools.find((tool) => tool.name === "mcp_doctor_audit");
+    assert.deepEqual(auditTool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     const quick = await client.callTool({ name: "mcp_doctor_audit", arguments: { quick: true } });
     assert.equal(quick.structuredContent.summary.healthy, 0);
     assert.equal(quick.structuredContent.summary.healthScore, null);
