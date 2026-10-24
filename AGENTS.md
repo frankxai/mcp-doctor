@@ -6,7 +6,7 @@ This repo is part of the FrankX / Starlight / Arcanea agent estate.
 
 - Repo: `mcp-doctor`
 - Class: published npm CLI + MCP server (`@frankxai/mcp-doctor`)
-- Default health command: `pnpm run build && node dist/cli.js audit --quick`
+- Default health command: `pnpm run build && pnpm run audit --quick`
 - Remote: https://github.com/frankxai/mcp-doctor
 
 ## What this repo is
