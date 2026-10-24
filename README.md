@@ -341,7 +341,7 @@ git clone https://github.com/frankxai/mcp-doctor
 cd mcp-doctor
 pnpm install
 pnpm run build
-node dist/cli.js audit --quick
+pnpm run audit --quick
 ```
 
 ## License
