@@ -195,23 +195,3 @@ export function findMisplacedConfigs(): MisplacedConfig[] {
   return misplaced;
 }
 
-export function findMissingEnvVars(servers: McpServerEntry[]): McpServerEntry[] {
-  const suspicious: McpServerEntry[] = [];
-
-  for (const server of servers) {
-    const env = server.config.env || {};
-    for (const [key, value] of Object.entries(env)) {
-      if (
-        !value ||
-        value === "" ||
-        value.startsWith("YOUR_") ||
-        value === "undefined"
-      ) {
-        suspicious.push(server);
-        break;
-      }
-    }
-  }
-
-  return suspicious;
-}
