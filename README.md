@@ -55,6 +55,24 @@ npx @frankxai/mcp-doctor check --json -- node dist/server.js   # JSON report, ex
 
 On Windows, spawn `node <script>` directly rather than `npx <pkg>`, because `npx` resolves to `npx.cmd`.
 
+### Probe how a server behaves on bad input
+
+`check` and `score` read the tool list. `probe` calls the server. It asks one question schema linters cannot: when an agent sends something wrong, does the server refuse it cleanly, or accept it, hang, or die?
+
+```bash
+npx @frankxai/mcp-doctor probe -- node dist/server.js
+npx @frankxai/mcp-doctor probe --json -- node dist/server.js   # exit 1 on any failed probe
+```
+
+| Rule | Fails when |
+|---|---|
+| `unknown-tool` | A call to a tool that does not exist returns a success result, hangs, or drops the connection |
+| `bad-args` | A read-only tool accepts arguments its own `inputSchema` forbids (missing `required` fields, or an extra property when `additionalProperties` is `false`), or does not answer within 5 s |
+| `survives` | The server stops answering `tools/list` after the probes |
+| `connect` | The server does not start |
+
+Safety: only tools annotated `readOnlyHint: true` and not `destructiveHint: true` are ever called, and only with input their own schema rejects. Every other tool is listed as skipped. A tool whose schema accepts any object is skipped too, because no invalid input can be derived from it.
+
 ### Score a server against best practice
 
 `check` asks "does it work?". `score` asks "will an agent pick and use it well?". It grades the tool surface on seven criteria drawn from the MCP spec, Anthropic's [Writing effective tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents), and leading public servers. Each criterion is worth 2 points: all tools pass, half pass, or fewer.

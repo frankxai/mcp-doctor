@@ -25,6 +25,7 @@ import {
 import { startMcpServer } from "./mcp-server.js";
 import { checkServer, inspectServer } from "./checker/check-server.js";
 import { scoreTools } from "./checker/score.js";
+import { probeServer } from "./checker/probe.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
 
 const HELP = `
@@ -43,6 +44,7 @@ const HELP = `
     score -- <cmd>     Grade a server's tool surface against best-in-class practice
     score --json --min 70 -- <cmd>  JSON report; exit 1 below the minimum percent
     score --prefix sis -- <cmd>     Grade names against a brand prefix other than the server name
+    probe -- <cmd>     Send read-only tools input their schema forbids; exit 1 if any is accepted, hangs or kills the server
     help               Show this help message
 
   Examples:
@@ -278,6 +280,28 @@ async function runCheck(args: string[]): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+async function runProbe(args: string[]): Promise<number> {
+  const split = args.indexOf("--");
+  const target = split === -1 ? [] : args.slice(split + 1);
+  if (target.length === 0) {
+    console.error("  Usage: mcp-doctor probe [--json] -- <command> [args...]");
+    return 1;
+  }
+  const report = await probeServer(target[0], target.slice(1));
+  if (args.slice(0, split).includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    const label = report.server ? `${report.server.name}@${report.server.version}` : target.join(" ");
+    console.log(`  ${report.ok ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} ${label} — probed ${report.probed.length} of ${report.toolCount} tool(s)`);
+    for (const finding of report.findings) {
+      const mark = finding.ok ? "\x1b[32mok\x1b[0m  " : "\x1b[31mfail\x1b[0m";
+      console.log(`    ${mark} [${finding.rule}]${finding.tool ? ` ${finding.tool}:` : ""} ${finding.message}`);
+    }
+    for (const skip of report.skipped) console.log(`    skip ${skip.tool}: ${skip.reason}`);
+  }
+  return report.ok ? 0 : 1;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -297,6 +321,9 @@ async function main() {
       return;
     case "check":
       process.exitCode = await runCheck(args.slice(1));
+      return;
+    case "probe":
+      process.exitCode = await runProbe(args.slice(1));
       return;
     case "serve":
       startMcpServer();
