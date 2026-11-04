@@ -3,7 +3,6 @@
 import {
   scanAllServers,
   findDuplicates,
-  findMissingEnvVars,
   findMisplacedConfigs,
 } from "./scanner/config-reader.js";
 import {
