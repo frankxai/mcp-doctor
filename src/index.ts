@@ -1,6 +1,7 @@
 export {
   scanAllServers,
   findDuplicates,
+  findMissingEnvVars,
   findMisplacedConfigs,
   readClaudeConfig,
   getClaudeConfigPath,
