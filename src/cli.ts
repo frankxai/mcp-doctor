@@ -25,6 +25,12 @@ import { startMcpServer } from "./mcp-server.js";
 import { checkServer, inspectServer } from "./checker/check-server.js";
 import { scoreTools } from "./checker/score.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
+import { formatPlan, planHeal, readClaudeConfigText } from "./heal/plan.js";
+import { applyHeal, formatApply } from "./heal/apply.js";
+import { formatRollback, rollbackHeal } from "./heal/rollback.js";
+import { getClaudeConfigPath } from "./scanner/config-reader.js";
+import { resolve } from "path";
+import { existsSync } from "fs";
 
 const HELP = `
   Usage: mcp-doctor <command> [options]
@@ -42,6 +48,13 @@ const HELP = `
     score -- <cmd>     Grade a server's tool surface against best-in-class practice
     score --json --min 70 -- <cmd>  JSON report; exit 1 below the minimum percent
     score --prefix sis -- <cmd>     Grade names against a brand prefix other than the server name
+    heal --plan        List proposed repairs without writing anything
+    heal --apply       Execute safe repairs (quarantine dead servers), write receipts
+    heal --rollback <id>  Restore the pre-image saved under .mcp-doctor/heal/ (--force to overwrite)
+    heal --config <path>  Target an explicit config file for every scope (plan, apply, rollback);
+                       --apply with --config counts as confirmed, no --yes needed
+    heal --apply --yes Confirm writing the live profile (~/.claude.json) resolved from the home
+                       directory; without --yes or --config, apply exits 3 and writes nothing
     help               Show this help message
 
   Examples:
@@ -277,6 +290,73 @@ async function runCheck(args: string[]): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+async function runHeal(args: string[]): Promise<number> {
+  const rollbackIdx = args.indexOf("--rollback");
+  try {
+    // §4.3: --config <path> is the explicit target for every scope; nothing is
+    // resolved from the environment while it is present. Naming the file is
+    // the confirmation, so an explicit target never needs --yes.
+    let configOverride: string | undefined;
+    const configIdx = args.indexOf("--config");
+    if (configIdx !== -1) {
+      const value = args[configIdx + 1];
+      if (!value || value.startsWith("--")) {
+        console.error("  Usage: mcp-doctor heal --config <path> [--plan | --apply | --rollback <id>]");
+        return 4;
+      }
+      configOverride = resolve(value);
+    }
+    const targetPath = configOverride ?? getClaudeConfigPath();
+    const yes = args.includes("--yes");
+
+    if (rollbackIdx !== -1) {
+      const id = args[rollbackIdx + 1];
+      if (!id || id.startsWith("--")) {
+        console.error("  Usage: mcp-doctor heal --rollback <id> [--force]");
+        return 4;
+      }
+      const outcome = rollbackHeal(id, args.includes("--force"), configOverride);
+      console.log(formatRollback(outcome));
+      return outcome.status === "refused" ? 3 : 0;
+    }
+
+    // --plan and --apply point at an existing file when --config names one:
+    // refuse instead of creating it.
+    if (configOverride !== undefined && !existsSync(configOverride) && (args.includes("--apply") || args.includes("--plan"))) {
+      console.error(`  heal: config file not found: ${configOverride}`);
+      return 4;
+    }
+
+    if (args.includes("--apply")) {
+      // Live profile = the path resolved from the ambient home directory, with
+      // no --config. Writing it requires --yes; the refusal touches nothing.
+      if (configOverride === undefined && !yes) {
+        console.error(
+          `  heal --apply refused: this would write ${targetPath}. Confirm with --yes, or target an explicit file with --config <path>.`
+        );
+        return 3;
+      }
+      console.log(targetPath);
+      const result = await applyHeal(configOverride);
+      console.log(formatApply(result, result.plan));
+      return result.applied > 0 ? 2 : 0;
+    }
+    if (args.includes("--plan")) {
+      console.log(targetPath);
+      const location = readClaudeConfigText(configOverride);
+      const plan = await planHeal(configOverride);
+      console.log(formatPlan(plan, location?.configPath ?? targetPath));
+      return plan.items.length > 0 ? 1 : 0;
+    }
+    console.error("  Usage: mcp-doctor heal --plan | --apply | --rollback <id> [--force] [--config <path>] [--yes]");
+    return 4;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`  heal failed: ${redactSecrets(message, {})}`);
+    return 4;
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -296,6 +376,9 @@ async function main() {
       return;
     case "check":
       process.exitCode = await runCheck(args.slice(1));
+      return;
+    case "heal":
+      process.exitCode = await runHeal(args.slice(1));
       return;
     case "serve":
       startMcpServer();
