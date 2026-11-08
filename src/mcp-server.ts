@@ -20,6 +20,17 @@ import { checkAllServers } from "./scanner/health-checker.js";
 import { analyzeTiers } from "./analyzer/tier-optimizer.js";
 import { PRESETS } from "./analyzer/presets.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
+import { homedir } from "os";
+import { existsSync } from "fs";
+import { resolve } from "path";
+import { planHeal } from "./heal/plan.js";
+import { applyHeal } from "./heal/apply.js";
+import { rollbackHeal } from "./heal/rollback.js";
+import { HealPlan, RECEIPT_ID_PATTERN, preImagePathFor } from "./heal/types.js";
+// The verb table lives in ./heal/modes.ts, the single source of truth the CLI
+// help also renders from (PRD-005 criterion 5): editing a row changes both
+// surfaces with the next build.
+import { DOCTOR_VERBS } from "./heal/modes.js";
 
 const MISPLACED_FIX = [
   "Remove the mcpServers block from each settings.json listed.",
@@ -54,12 +65,61 @@ function structured<T extends Record<string, unknown>>(value: T) {
   };
 }
 
+// ---- heal (PRD-005): shared shapes, single verb table ----
+
+/** Explicit-target input: the 2026-11-08 rule. MCP callers are not terminal users. */
+const CONFIG_PATH_INPUT = z
+  .string()
+  .min(1)
+  .max(500)
+  .describe("The only file this verb may touch, resolved to an absolute path. There is no default: an omitted or ambient-resolved target was how a bad environment variable once reached a live config, so it is rejected.");
+
+const healPlanItemSchema = z.object({
+  rung: z.enum(["H1"]),
+  server: z.string(),
+  scope: z.enum(["user", "project-local"]),
+  projectPath: z.string().optional(),
+  reason: z.string().describe("Redacted, deterministic failure reason; secrets stripped."),
+  detail: z.string().optional(),
+});
+
+const healSkippedSchema = z.object({
+  server: z.string(),
+  scope: z.enum(["user", "project-local"]),
+  skipClass: z.enum(["unauthenticated", "remote-untested", "transient"]),
+  message: z.string(),
+});
+
+const healPlanSchema = z.object({ items: z.array(healPlanItemSchema), skipped: z.array(healSkippedSchema) });
+
+/** JSON-safe surface of a HealPlan: names and redacted reasons only. The raw
+ *  source.config/span/parsed mechanics stay internal — they carry unredacted
+ *  env values and byte offsets an agent never needs. */
+function slimPlan(plan: HealPlan) {
+  return {
+    items: plan.items.map((item) => ({
+      rung: item.rung,
+      server: item.source.name,
+      scope: item.source.scope,
+      ...(item.source.projectPath !== undefined ? { projectPath: item.source.projectPath } : {}),
+      reason: item.reason,
+      ...(item.detail ? { detail: item.detail } : {}),
+    })),
+    skipped: plan.skipped.map((skipper) => ({
+      server: skipper.source.name,
+      scope: skipper.source.scope,
+      skipClass: skipper.skipClass,
+      message: skipper.message,
+    })),
+  };
+}
+
 export function createDoctorServer(): McpServer {
   const server = new McpServer(
     { name: "mcp-doctor", version: VERSION },
     {
       instructions:
-        "Diagnose this machine's MCP setup. Start with mcp_doctor_audit (quick=true is instant); if a server the user expects is missing, run mcp_doctor_misplaced_configs.",
+        "Diagnose this machine's MCP setup. Start with mcp_doctor_audit (quick=true is instant); if a server the user expects is missing, run mcp_doctor_misplaced_configs. To repair a dead server, read mcp_doctor_modes first: mcp_doctor_heal_plan previews with an explicit configPath and writes nothing, mcp_doctor_heal_apply mutates only the config it names, and mcp_doctor_heal_rollback undoes via the receipt id.",
     },
   );
 
@@ -255,6 +315,135 @@ export function createDoctorServer(): McpServer {
         },
       });
     },
+  );
+
+  server.registerTool(
+    "mcp_doctor_heal_plan",
+    {
+      title: "Plan MCP config repairs",
+      description:
+        "Read-only dry-run of heal, equivalent to `heal --plan --config <path>`. Reads the exact config file named by configPath (required; the ambient profile is never consulted for an MCP caller), health-probes the stdio servers it declares, and returns the H1 quarantine proposals with redacted reasons plus the entries skipped as remote/unauthenticated/transient. Writes nothing: no config bytes, no receipts, no state directories.",
+      inputSchema: { configPath: CONFIG_PATH_INPUT },
+      outputSchema: {
+        configPath: z.string(),
+        items: z.array(healPlanItemSchema),
+        skipped: z.array(healSkippedSchema),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ configPath }) => {
+      const resolved = resolve(configPath);
+      if (!existsSync(resolved)) {
+        throw new Error(`heal_plan: config file not found: ${resolved}. Pass an existing config path; heal never creates one.`);
+      }
+      const plan = await planHeal(resolved);
+      return structured({ configPath: resolved, ...slimPlan(plan) });
+    },
+  );
+
+  server.registerTool(
+    "mcp_doctor_heal_apply",
+    {
+      title: "Apply MCP config repairs",
+      description:
+        "Mutating (`heal --apply --config <path> --yes`). Runs the H1 rung on the exact config named by configPath — configPath is required and the ambient profile is never resolved, because MCP callers are not terminal users and a bad environment variable once reached a live config. Dead server entries are quarantined with byte-exact splicing; receipts and 0600 pre-images are recorded beside the target. Returns what applied, the receipt ids, the pre-image paths, and the plan actually executed, so a caller that skipped planning still sees what moved. Writes the named config only.",
+      inputSchema: { configPath: CONFIG_PATH_INPUT },
+      outputSchema: {
+        applied: z.number(),
+        configPath: z.string(),
+        receiptIds: z.array(z.string()),
+        preImageSha256: z.string(),
+        postImageSha256: z.string(),
+        preImagePath: z.array(z.object({ id: z.string(), path: z.string() })),
+        plan: healPlanSchema,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ configPath }) => {
+      const resolved = resolve(configPath);
+      if (!existsSync(resolved)) {
+        throw new Error(`heal_apply: config file not found: ${resolved}. Pass an existing config path; heal never creates one.`);
+      }
+      const result = await applyHeal(resolved);
+      return structured({
+        applied: result.applied,
+        configPath: result.configPath,
+        receiptIds: result.receiptIds,
+        preImageSha256: result.preImageSha256,
+        postImageSha256: result.postImageSha256,
+        preImagePath: result.receiptIds.map((id) => ({ id, path: preImagePathFor(homedir(), id) })),
+        plan: slimPlan(result.plan),
+      });
+    },
+  );
+
+  server.registerTool(
+    "mcp_doctor_heal_rollback",
+    {
+      title: "Roll back a heal receipt",
+      description:
+        "Mutating (`heal --rollback <id> --config <path>`). Restores the byte-exact pre-image a heal receipt recorded. Both id and configPath are required: the receipt is looked up next to the named config, and a receipt whose recorded target path does not match configPath is refused — a receipt is data and must never be able to redirect a write. Returns the restore status (restored, already-restored, refused) with the refusal reason on refusal. Writes the named config only.",
+      inputSchema: {
+        id: z
+          .string()
+          .regex(RECEIPT_ID_PATTERN)
+          .describe("Heal receipt id exactly as returned by mcp_doctor_heal_apply."),
+        configPath: CONFIG_PATH_INPUT,
+      },
+      outputSchema: {
+        id: z.string(),
+        status: z.enum(["restored", "already-restored", "refused"]),
+        configPath: z.string(),
+        receiptPath: z.string(),
+        preImageSha256: z.string(),
+        postImageSha256: z.string(),
+        refusal: z.string().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id, configPath }) => {
+      const outcome = rollbackHeal(id, false, resolve(configPath));
+      const value = {
+        id: outcome.id,
+        status: outcome.status,
+        configPath: outcome.configPath,
+        receiptPath: outcome.receiptPath,
+        preImageSha256: outcome.preImageSha256,
+        postImageSha256: outcome.postImageSha256,
+        ...(outcome.refusal ? { refusal: outcome.refusal } : {}),
+      };
+      if (outcome.status === "refused") {
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `heal rollback refused: ${outcome.refusal ?? "policy refused"}` }],
+          structuredContent: value,
+        };
+      }
+      return structured(value);
+    },
+  );
+
+  server.registerTool(
+    "mcp_doctor_modes",
+    {
+      title: "List verbs and their write class",
+      description:
+        "Read this before acting: it returns every verb's CLI mapping, write class (read-only vs named-config-write), what it reads, and exactly what it writes, derived from the same table the heal flags follow. The heal writers (mcp_doctor_heal_apply, mcp_doctor_heal_rollback) always require an explicit configPath in their input schema and refuse the ambient profile — there is no default target. Static table, no I/O.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: {
+        verbs: z.array(
+          z.object({
+            verb: z.string(),
+            mapsTo: z.string(),
+            writeClass: z.enum(["read-only", "named-config-write"]),
+            target: z.string(),
+            writes: z.string(),
+          }),
+        ),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => structured({ verbs: DOCTOR_VERBS }),
   );
 
   return server;

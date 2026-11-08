@@ -28,6 +28,9 @@ import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-read
 import { formatPlan, planHeal, readClaudeConfigText } from "./heal/plan.js";
 import { applyHeal, formatApply } from "./heal/apply.js";
 import { formatRollback, rollbackHeal } from "./heal/rollback.js";
+// The verb table the MCP `modes` tool serves is also rendered into the CLI
+// help below (PRD-005 criterion 5): one source, two surfaces, no drift.
+import { DOCTOR_VERBS } from "./heal/modes.js";
 import { getClaudeConfigPath } from "./scanner/config-reader.js";
 import { resolve } from "path";
 import { existsSync } from "fs";
@@ -67,6 +70,26 @@ const HELP = `
   MCP Server Mode:
     claude mcp add mcp-doctor -- npx -y @frankxai/mcp-doctor serve
 `;
+
+/**
+ * The MCP verb table, rendered for a terminal reader. PRD-005 criterion 5 keeps
+ * this section and mcp_doctor_modes' response on one list: the table in
+ * src/heal/modes.ts is the single source, so editing it changes both surfaces
+ * with the next build. The surrounding help prose stays by hand — flags like
+ * --force and --yes say more than the table's write classes do.
+ */
+function verbTableHelp(): string {
+  const width = Math.max(...DOCTOR_VERBS.map((row) => row.verb.length));
+  const lines = [
+    "",
+    "  MCP verbs (the same table mcp_doctor_modes serves):",
+    "",
+  ];
+  for (const row of DOCTOR_VERBS) {
+    lines.push(`    ${row.verb.padEnd(width)}  ${row.mapsTo}  [${row.writeClass}]`);
+  }
+  return `${lines.join("\n")}\n`;
+}
 
 async function runAudit(args: string[]) {
   const quick = args.includes("--quick");
@@ -388,11 +411,11 @@ async function main() {
     case "-h":
     case undefined:
       console.log(formatHeader());
-      console.log(HELP);
+      console.log(HELP + verbTableHelp());
       break;
     default:
       console.log(`  Unknown command: ${command}`);
-      console.log(HELP);
+      console.log(HELP + verbTableHelp());
       process.exit(1);
   }
 }
