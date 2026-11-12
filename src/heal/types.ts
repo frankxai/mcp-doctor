@@ -3,9 +3,19 @@
 // in the file, relocate it into a quarantined[] block, and leave every other
 // byte of the file untouched.
 import { createHash } from "crypto";
-import { dirname, join } from "path";
-import { chmodSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { dirname, isAbsolute, join, resolve } from "path";
+import {
+  chmodSync,
+  lstatSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import type { ReconstructionRecord } from "./reconstruct.js";
+import type { ReceiptEntrySummary } from "./receipt-diff.js";
 
 export type RepairRung = "H1";
 
@@ -19,7 +29,7 @@ export interface HealSourceEntry {
   config: unknown;
 }
 
-export type SkippedClass = "unauthenticated" | "remote-untested" | "transient";
+export type SkippedClass = "unauthenticated" | "remote-untested" | "transient" | "misconfigured";
 
 export interface HealPlanItem {
   rung: RepairRung;
@@ -53,10 +63,13 @@ export interface HealReceipt {
   configHash: string;
   preImageSha256: string;
   postImageSha256: string;
-  /** Redacted only. A receipt is an artifact a user is invited to read. */
+  /**
+   * Structural summaries only: the server name, its key names, and a sha256
+   * per value. No config value is ever stored in a receipt (review finding 1).
+   */
   diff: {
-    removedEntries: string[];
-    quarantinedEntries: string[];
+    removedEntries: ReceiptEntrySummary[];
+    quarantinedEntries: Array<ReceiptEntrySummary & { reason: string }>;
   };
   /** Hole-punched bytes plus offsets; enough to rebuild the pre-image, no values. */
   reconstruction: ReconstructionRecord;
@@ -280,24 +293,56 @@ export function quarantineEntryText(name: string, rawValue: string, reason: stri
   return `{"name":${JSON.stringify(name)},"config":${rawValue},"reason":${JSON.stringify(reason)}}`;
 }
 
-// ---- artifact persistence (PRD-001 §4.2) ----
+// ---- artifact persistence (PRD-001 §4.2, review finding 4) ----
 
-/** Temp file plus rename so a partially-written artifact can never be read. */
-export function writeArtifact(path: string, data: string, mode?: number): void {
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, data, "utf8");
+/**
+ * Resolve a symlinked artifact to what it points at, so replacing the contents
+ * does not replace the user's link with a regular file. A dangling link is
+ * resolved by hand; a missing path is returned unchanged.
+ */
+function artifactTarget(path: string): string {
   try {
-    renameSync(tmp, path);
+    if (lstatSync(path).isSymbolicLink()) {
+      try {
+        return realpathSync(path);
+      } catch {
+        const link = readlinkSync(path);
+        return isAbsolute(link) ? link : resolve(dirname(path), link);
+      }
+    }
+  } catch {
+    // Not a link, or nothing there yet.
+  }
+  return path;
+}
+
+function existingMode(path: string): number | undefined {
+  try {
+    return statSync(path).mode & 0o777;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Temp file plus rename so a partially written artifact can never be read.
+ *
+ * The temporary file is created with its final mode (and chmoded before the
+ * rename, since the create mode is umask-masked), so there is no window in
+ * which a world-readable config exists. A symlinked target is written through,
+ * keeping the link intact.
+ */
+export function writeArtifact(path: string, data: string, mode?: number): void {
+  const target = artifactTarget(path);
+  const effective = mode ?? existingMode(target) ?? 0o600;
+  const tmp = `${target}.tmp-${process.pid}`;
+  writeFileSync(tmp, data, { encoding: "utf8", mode: effective });
+  try {
+    chmodSync(tmp, effective);
+    renameSync(tmp, target);
   } catch (error) {
     try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
     throw error;
   }
-  if (mode !== undefined) {
-    try {
-      chmodSync(path, mode);
-    } catch {
-      // Windows chmod carries only the read-only bit; pre-image secrecy on
-      // Windows relies on the profile directory's ACLs. Never fail a repair.
-    }
-  }
 }
+

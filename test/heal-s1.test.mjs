@@ -149,8 +149,17 @@ test("heal --apply changes exactly one entry, writes one receipt, leaves the res
   assert.equal(receipt.postImageSha256, sha256(expectedPostText));
   assert.ok(!/"preImage"/.test(JSON.stringify(receipt)), "§4.1: receipts never carry a preImage");
   assert.ok(!/"preImagePath"/.test(JSON.stringify(receipt)), "§4.1: no external pre-image artifact is referenced");
-  assert.ok(Array.isArray(receipt.diff?.removedEntries) && receipt.diff.removedEntries.length === 1, "receipt carries a redacted diff");
-  assert.ok(Array.isArray(receipt.diff?.quarantinedEntries) && receipt.diff.quarantinedEntries.length === 1, "receipt carries a redacted diff");
+  assert.ok(Array.isArray(receipt.diff?.removedEntries) && receipt.diff.removedEntries.length === 1, "receipt carries a structural summary");
+  assert.ok(Array.isArray(receipt.diff?.quarantinedEntries) && receipt.diff.quarantinedEntries.length === 1, "receipt carries a structural summary");
+  // Finding 1: the summary says which server moved and which settings it had,
+  // and carries no value at all.
+  const removed = receipt.diff.removedEntries[0];
+  assert.equal(removed.server, "dead", "the receipt names which server moved");
+  assert.deepEqual(removed.keys, ["type", "command"], "the receipt names the entry's keys");
+  assert.deepEqual(removed.values.map((v) => v.path).sort(), [".", "command", "type"], "one reference per value, root included");
+  assert.ok(removed.values.every((v) => /^[a-f0-9]{64}$/.test(v.sha256)), "every value is a sha256 reference");
+  assert.ok(!JSON.stringify(receipt).includes(DEAD_COMMAND), "no config value reaches the receipt");
+  assert.ok(!JSON.stringify(receipt).includes(deadText), "no raw entry text reaches the receipt");
   assert.equal(receipt.reconstruction?.version, 1, "receipt carries the reconstruction record");
   assert.equal(receipt.reconstruction.removals.length, 1);
   assert.equal(receipt.reconstruction.removals[0].holes[0].name, "dead");

@@ -5,19 +5,18 @@
 // receives each dead entry with its raw value bytes embedded verbatim.
 //
 // Artifacts follow PRD-001 §4.1 without storing the pre-image: receipts under
-// .mcp-doctor/heal/ carry ids, both sha256s, a redacted diff and a hole-punched
-// template of exactly what was removed — never a config value. Rollback rebuilds
-// the pre-image from that template plus the live quarantine block (§4.1 vs §5.3,
-// review surface B). §4.2: receipts are persisted first, atomically; the config
-// is replaced last, also atomically, so a crash can never leave a mutation no
-// receipt explains.
+// .mcp-doctor/heal/ carry ids, both sha256s, a structural summary of what moved
+// and a hole-punched template of exactly what was removed — never a config
+// value. Rollback rebuilds the pre-image from that template plus the live
+// quarantine block (§4.1 vs §5.3, review surface B). §4.2: receipts are
+// persisted first, atomically; the config is replaced last, also atomically, so
+// a crash can never leave a mutation no receipt explains.
 //
 // The decision itself comes from the durable failure history recorded by
 // `audit` (review surface A): apply never re-probes, so it acts on exactly the
 // evidence `--plan` read.
 import { mkdirSync, statSync } from "fs";
-import { dirname, join } from "path";
-import { redactArgSecrets, redactSecrets } from "../checker/check-server.js";
+import { join } from "path";
 import {
   HealPlanItem,
   HealPlan,
@@ -45,6 +44,7 @@ import {
   mapOffset,
   planRemoval,
 } from "./reconstruct.js";
+import { summarizeEntry } from "./receipt-diff.js";
 import { configHashFor } from "./failure-store.js";
 import { planFromText, readClaudeConfigText } from "./plan.js";
 
@@ -151,25 +151,6 @@ function validatePostImage(newText: string, items: HealPlanItem[]): void {
   }
 }
 
-function unionEnvAndArgs(items: HealPlanItem[]): { env: Record<string, string>; args: string[] } {
-  const env: Record<string, string> = {};
-  const args: string[] = [];
-  for (const item of items) {
-    const config = item.source.config as { env?: Record<string, unknown>; args?: unknown[] } | null;
-    if (config && typeof config === "object") {
-      if (config.env && typeof config.env === "object") {
-        for (const [key, value] of Object.entries(config.env as Record<string, unknown>)) {
-          if (typeof value === "string") env[key] = value;
-        }
-      }
-      if (Array.isArray(config.args)) {
-        for (const arg of config.args) if (typeof arg === "string") args.push(arg);
-      }
-    }
-  }
-  return { env, args };
-}
-
 export async function applyHeal(configPathOverride?: string): Promise<ApplyResult & { plan: HealPlan }> {
   // §4.3: with --config the named file is the only target and nothing is
   // resolved from the environment.
@@ -204,8 +185,6 @@ export async function applyHeal(configPathOverride?: string): Promise<ApplyResul
   };
 
   const receiptDir = healDirFor(configPath);
-  const { env, args } = unionEnvAndArgs(plan.items);
-  const redact = (value: string) => redactArgSecrets(redactSecrets(value, env), args);
 
   // §4.2: persist every receipt atomically, THEN replace the config, also
   // atomically. A crash leaves either an untouched config or a receipt for the
@@ -214,19 +193,22 @@ export async function applyHeal(configPathOverride?: string): Promise<ApplyResul
   const receiptIds: string[] = [];
   for (const item of plan.items) {
     const id = receiptIdFor(text, item.source.name, item.rung);
+    const rawValue = text.slice(item.span.valueStart, item.span.valueEnd);
+    // Structural summary only: the server name, its key names, and one sha256
+    // per value. A credential in args, url, headers or a nested object cannot
+    // reach the receipt because no value reaches it (review finding 1).
+    const summary = summarizeEntry(item.source.name, rawValue, item.parsed);
     const receipt: HealReceipt = {
       id,
       rung: item.rung,
       server: item.source.name,
       configPath,
-      configHash: configHashFor(text.slice(item.span.valueStart, item.span.valueEnd)),
+      configHash: configHashFor(rawValue),
       preImageSha256,
       postImageSha256,
       diff: {
-        removedEntries: [redact(text.slice(item.span.memberStart, item.span.valueEnd))],
-        quarantinedEntries: [
-          redact(quarantineEntryText(item.source.name, text.slice(item.span.valueStart, item.span.valueEnd), item.reason)),
-        ],
+        removedEntries: [summary],
+        quarantinedEntries: [{ ...summary, reason: item.reason }],
       },
       reconstruction,
     };
