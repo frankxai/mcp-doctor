@@ -1,10 +1,18 @@
 // heal --plan: locate MCP server registrations, decide what the repair ladder
 // would do, and print it. A plan never writes: no config bytes, no receipts,
-// no state directories.
+// no probe output, no history. It reads the durable failure history that
+// `audit` records, so `--plan` and `--apply` decide from the same evidence and
+// cannot disagree (PRD-001 §3 H1, review surface A).
 import { existsSync, readFileSync } from "fs";
-import { checkServerHealth } from "../scanner/health-checker.js";
-import { redactSecrets } from "../checker/check-server.js";
-import { getClaudeConfigPath, McpServerConfig, McpServerEntry } from "../scanner/config-reader.js";
+import { getClaudeConfigPath } from "../scanner/config-reader.js";
+import {
+  FAILURES_REQUIRED,
+  FailureStore,
+  configHashFor,
+  failureCountFor,
+  readFailureStore,
+  serverIdentity,
+} from "./failure-store.js";
 import {
   bold,
   dim,
@@ -19,12 +27,8 @@ import {
   parseRootObject,
   red,
   ruler,
-  SkippedClass,
-  SkippedEntry,
   yellow,
 } from "./types.js";
-
-export const PROBE_TIMEOUT_MS = 3000;
 
 export interface ScanTarget extends HealSourceEntry {
   span: MemberSpan;
@@ -72,93 +76,84 @@ function decodeMcpServers(text: string, container: ObjectSpan): ObjectSpan | und
   return parseObjectAt(text, member.valueStart) ?? undefined;
 }
 
-interface ProbeOutcome {
-  dead: boolean;
-  skipClass?: SkippedClass;
-  skipMessage?: string;
-  reason?: string;
-  detail?: string;
+export interface PlanOptions {
+  home?: string;
+  store?: FailureStore;
 }
 
-async function evaluateEntry(target: ScanTarget): Promise<ProbeOutcome> {
+function isRemote(target: ScanTarget): boolean {
   const config = target.config as Record<string, unknown> | null;
-  const isRemote =
-    !!config && (config.type === "sse" || config.type === "streamable-http");
-  if (isRemote) {
-    return { dead: false, skipClass: "remote-untested", skipMessage: "remote protocol; heal probes stdio only" };
-  }
-
-  const serverTarget: McpServerEntry = {
-    name: target.name,
-    config: target.config as McpServerConfig,
-    scope: target.scope,
-    ...(target.projectPath !== undefined ? { projectPath: target.projectPath } : {}),
-  };
-  const result = await checkServerHealth(serverTarget, PROBE_TIMEOUT_MS);
-
-  // H1 fires only on deterministic death (PRD review of S1). missing-command
-  // and broken are structural — the same probe fails on every run, no
-  // persistence needed. timeout is timing, not death: skipping it keeps
-  // three-probe blips from ever disabling a slow-but-alive server (S2 will
-  // gate those on persisted failure history).
-  if (result.status === "healthy" || result.status === "unchecked") return { dead: false };
-  if (result.status === "missing-env") {
-    return {
-      dead: false,
-      skipClass: "unauthenticated",
-      skipMessage: result.message,
-    };
-  }
-  if (result.status === "timeout") {
-    return {
-      dead: false,
-      skipClass: "transient",
-      skipMessage: "transient: needs failure history (S2)",
-    };
-  }
-
-  const env = (config && typeof config === "object" && (config as { env?: Record<string, string> }).env) || {};
-  const reason = redactSecrets(`MCP check failed (${result.status}): ${result.message}`, env);
-  const detail = result.detail ? redactSecrets(result.detail.slice(0, 200), env) : undefined;
-  return { dead: true, reason, detail };
+  return !!config && (config.type === "sse" || config.type === "streamable-http");
 }
 
-/** Decide the whole plan, including probes, from one config text snapshot. */
-export async function planFromText(text: string, configPath: string): Promise<HealPlan> {
+/** Structural only: a placeholder env value is a human's job, never a repair. */
+function unconfiguredEnv(target: ScanTarget): string | undefined {
+  const config = target.config as { env?: Record<string, unknown> } | null;
+  for (const [key, value] of Object.entries(config?.env ?? {})) {
+    if (typeof value !== "string" || !value || value.startsWith("YOUR_") || value === "undefined") {
+      return `Environment variable ${key} is not configured`;
+    }
+  }
+  return undefined;
+}
+
+function sourceOf(target: ScanTarget): HealSourceEntry {
+  return {
+    name: target.name,
+    scope: target.scope,
+    configPath: target.configPath,
+    ...(target.projectPath !== undefined ? { projectPath: target.projectPath } : {}),
+    config: target.config,
+  };
+}
+
+/**
+ * Decide the whole plan from one config text snapshot and the recorded check
+ * history. No probe: the count *is* the evidence, and it was recorded by
+ * separate `audit` invocations over time.
+ */
+export async function planFromText(text: string, configPath: string, options: PlanOptions = {}): Promise<HealPlan> {
   const plan: HealPlan = { items: [], skipped: [] };
   if (!parseRootObject(text)) {
     throw new Error(`not valid JSON: ${configPath}`);
   }
+  const store = options.store ?? readFailureStore(options.home);
+
   for (const target of scanHealTargets(text, configPath)) {
-    const outcome = await evaluateEntry(target);
-    if (outcome.dead && outcome.reason) {
+    if (isRemote(target)) {
+      plan.skipped.push({ source: sourceOf(target), skipClass: "remote-untested", message: "remote protocol; heal probes stdio only" });
+      continue;
+    }
+
+    const rawValue = text.slice(target.span.valueStart, target.span.valueEnd);
+    const configHash = configHashFor(rawValue);
+    const count = failureCountFor(store, configPath, target.scope, target.name, target.projectPath, configHash);
+    const record = store.records[serverIdentity(configPath, target.scope, target.name, target.projectPath)];
+
+    if (count >= FAILURES_REQUIRED && record) {
       const item: HealPlanItem = {
         rung: "H1",
-        source: {
-          name: target.name,
-          scope: target.scope,
-          configPath: target.configPath,
-          ...(target.projectPath !== undefined ? { projectPath: target.projectPath } : {}),
-          config: target.config,
-        },
-        reason: outcome.reason,
-        ...(outcome.detail ? { detail: outcome.detail } : {}),
+        source: sourceOf(target),
+        reason: `MCP check failed (${record.lastStatus}) on ${count} consecutive audit runs; last failure ${record.lastFailureAt}`,
         span: target.span,
         parsed: target.config,
       };
       plan.items.push(item);
-    } else if (outcome.skipClass) {
+      continue;
+    }
+
+    if (count > 0 && record) {
       plan.skipped.push({
-        source: {
-          name: target.name,
-          scope: target.scope,
-          configPath: target.configPath,
-          ...(target.projectPath !== undefined ? { projectPath: target.projectPath } : {}),
-          config: target.config,
-        },
-        skipClass: outcome.skipClass,
-        message: outcome.skipMessage ?? "",
+        source: sourceOf(target),
+        skipClass: "transient",
+        message: `${count}/${FAILURES_REQUIRED} consecutive failed checks (${record.lastStatus} at ${record.lastFailureAt}); run mcp-doctor audit to record another`,
       });
+      continue;
+    }
+
+    const missingEnv = unconfiguredEnv(target);
+    if (missingEnv) {
+      plan.skipped.push({ source: sourceOf(target), skipClass: "unauthenticated", message: missingEnv });
     }
   }
   return plan;
@@ -178,10 +173,10 @@ export function readClaudeConfigText(configPathOverride?: string): HealConfigLoc
 }
 
 /** heal --plan against the current config on disk. Never writes. */
-export async function planHeal(configPathOverride?: string): Promise<HealPlan> {
+export async function planHeal(configPathOverride?: string, options: PlanOptions = {}): Promise<HealPlan> {
   const location = readClaudeConfigText(configPathOverride);
   if (!location) return { items: [], skipped: [] };
-  return planFromText(location.text, location.configPath);
+  return planFromText(location.text, location.configPath, options);
 }
 
 const SCOPE_LABELS: { [scope: string]: string } = {
@@ -203,7 +198,6 @@ export function formatPlan(plan: HealPlan, configPath: string): string {
     const where = dim(`[${SCOPE_LABELS[item.source.scope] ?? item.source.scope}]`);
     lines.push(`  ${red("✗")} ${item.rung} ${bold("QUARANTINE-DEAD")} ${item.source.name} ${where}`);
     lines.push(`      ${dim(item.reason)}`);
-    if (item.detail) lines.push(`      ${dim(item.detail)}`);
     lines.push(`      ${dim('proposal: disable the entry and record it under quarantined[]')}`);
   }
 

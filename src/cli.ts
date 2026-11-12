@@ -25,9 +25,10 @@ import { startMcpServer } from "./mcp-server.js";
 import { checkServer, inspectServer } from "./checker/check-server.js";
 import { scoreTools } from "./checker/score.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
-import { formatPlan, planHeal, readClaudeConfigText } from "./heal/plan.js";
+import { formatPlan, planHeal, readClaudeConfigText, scanHealTargets } from "./heal/plan.js";
 import { applyHeal, formatApply } from "./heal/apply.js";
 import { formatRollback, rollbackHeal } from "./heal/rollback.js";
+import { recordCheckRun, serverIdentity } from "./heal/failure-store.js";
 // The verb table the MCP `modes` tool serves is also rendered into the CLI
 // help below (PRD-005 criterion 5): one source, two surfaces, no drift.
 import { DOCTOR_VERBS } from "./heal/modes.js";
@@ -51,9 +52,13 @@ const HELP = `
     score -- <cmd>     Grade a server's tool surface against best-in-class practice
     score --json --min 70 -- <cmd>  JSON report; exit 1 below the minimum percent
     score --prefix sis -- <cmd>     Grade names against a brand prefix other than the server name
-    heal --plan        List proposed repairs without writing anything
+    heal --plan        List proposed repairs without writing anything. H1 fires
+                       only after 3 consecutive failed 'audit' runs (history is
+                       kept in ~/.mcp-doctor/failure-history.json, counts only)
     heal --apply       Execute safe repairs (quarantine dead servers), write receipts
-    heal --rollback <id>  Restore the pre-image saved under .mcp-doctor/heal/ (--force to overwrite)
+    heal --rollback <id>  Rebuild and restore the pre-image from the receipt and quarantined[]
+                       (--force discards intervening changes; it refuses if the
+                       reconstruction cannot be proven byte-exact)
     heal --config <path>  Target an explicit config file for every scope (plan, apply, rollback);
                        --apply with --config counts as confirmed, no --yes needed
     heal --apply --yes Confirm writing the live profile (~/.claude.json) resolved from the home
@@ -91,6 +96,51 @@ function verbTableHelp(): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Record one audit's probe outcomes into the durable H1 failure history
+ * (PRD-001 §3 H1). This is the only writer: `heal --plan` must write nothing,
+ * and a count that lives inside one invocation is not evidence of anything.
+ * Only servers the heal ladder can actually edit (Claude user/project entries)
+ * are recorded, and only status classes are stored.
+ */
+function recordAuditHistory(
+  servers: ReturnType<typeof scanAllServers>,
+  healthResults: Awaited<ReturnType<typeof checkAllServers>>
+): void {
+  const location = readClaudeConfigText();
+  if (!location || servers.length !== healthResults.length) return;
+  const rawValues = new Map<string, string>();
+  for (const target of scanHealTargets(location.text, location.configPath)) {
+    rawValues.set(
+      serverIdentity(location.configPath, target.scope, target.name, target.projectPath),
+      location.text.slice(target.span.valueStart, target.span.valueEnd)
+    );
+  }
+
+  const entries = servers.flatMap((server, i) => {
+    if (server.scope !== "user" && server.scope !== "project-local") return [];
+    const rawValue = rawValues.get(serverIdentity(location.configPath, server.scope, server.name, server.projectPath));
+    if (rawValue === undefined) return [];
+    return [
+      {
+        name: server.name,
+        scope: server.scope,
+        ...(server.projectPath !== undefined ? { projectPath: server.projectPath } : {}),
+        rawValue,
+        status: healthResults[i].status,
+      },
+    ];
+  });
+  if (entries.length === 0) return;
+  // History is advisory: a home directory that refuses the write must never
+  // make the audit itself fail.
+  try {
+    recordCheckRun({ configPath: location.configPath, entries });
+  } catch {
+    // no history this run; the next audit retries
+  }
+}
+
 async function runAudit(args: string[]) {
   const quick = args.includes("--quick");
   const projectIdx = args.indexOf("--project");
@@ -117,6 +167,9 @@ async function runAudit(args: string[]) {
     console.log("  Running health checks (this may take a moment)...\n");
   }
   const healthResults = await checkAllServers(servers, { quick });
+  // H1's precondition is recorded here and read by heal; one invocation counts
+  // at most once, whatever the probe count inside it.
+  if (!quick) recordAuditHistory(servers, healthResults);
 
   // Duplicates
   const duplicates = findDuplicates(servers);
