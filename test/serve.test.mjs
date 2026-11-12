@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -169,7 +170,8 @@ async function doctorVerbs() {
 }
 
 const DEAD_COMMAND = 'mcp-doctor-serve-heal-fixture-missing-binary';
-const REASON = 'MCP check failed (missing-command): Server command could not be started';
+const LAST_FAILURE = '2026-11-01T00:00:00.000Z';
+const REASON = `MCP check failed (missing-command) on 3 consecutive audit runs; last failure ${LAST_FAILURE}`;
 const HEAL_SECRET = 'sk-heal-should-never-leak';
 
 const deadConfig = { type: 'stdio', command: DEAD_COMMAND, env: { TOKEN: HEAL_SECRET } };
@@ -180,11 +182,36 @@ const healPreText = `{"mcpServers":{"healthy":${healthyText},"dead":${deadText}}
 const quarantineEntry = `{"name":"dead","config":${deadText},"reason":${JSON.stringify(REASON)}}`;
 const healPostText = `{"quarantined":[${quarantineEntry}],"mcpServers":{"healthy":${healthyText}}}`;
 
+/**
+ * Seed the durable H1 failure history exactly as three separate `audit` runs
+ * would (PRD-001 §3 H1, review surface A). Same file, same identity key, same
+ * config hash the production read path computes — the test exercises the real
+ * reader, never a parallel one.
+ */
+function seedHealHistory(configPath, rawValue, name = 'dead') {
+  const file = path.join(home, '.mcp-doctor', 'failure-history.json');
+  mkdirSync(path.dirname(file), { recursive: true });
+  const store = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, records: {} };
+  store.records[`${configPath}\u0000user\u0000\u0000${name}`] = {
+    server: name,
+    scope: 'user',
+    configPath,
+    configHash: createHash('sha256').update(rawValue, 'utf8').digest('hex'),
+    consecutiveFailures: 3,
+    firstFailureAt: '2026-10-31T00:00:00.000Z',
+    lastFailureAt: LAST_FAILURE,
+    lastStatus: 'missing-command',
+    run: 'seed',
+  };
+  writeFileSync(file, JSON.stringify(store, null, 2), 'utf8');
+}
+
 /** A heal fixture config inside its own temp dir; the receipt tree lands beside it. */
-function healFixture() {
+function healFixture({ seed = true } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'mcp-doctor-serve-heal-'));
   const configPath = path.join(dir, 'claude.json');
   writeFileSync(configPath, healPreText, 'utf8');
+  if (seed) seedHealHistory(configPath, deadText);
   return { dir, configPath };
 }
 
@@ -257,11 +284,33 @@ test('PRD-005 §4.3: heal_apply with configPath applies, returns the plan it exe
     assert.equal(receipt.preImageSha256, applied.preImageSha256);
     assert.equal(receipt.postImageSha256, applied.postImageSha256);
 
-    // preImagePath in the response exists and holds the verbatim pre-image.
-    assert.equal(applied.preImagePath.length, 1);
-    assert.ok(existsSync(applied.preImagePath[0].path), 'the pre-image path in the response exists');
-    assert.equal(applied.preImagePath[0].id, applied.receiptIds[0]);
-    assert.equal(readFileSync(applied.preImagePath[0].path, 'utf8'), healPreText, 'the store holds the byte-exact pre-image');
+    // §4.3/§5.3: the receipt carries hashes and a redacted diff, never a
+    // plaintext pre-image or a path to one, and no artifact under .mcp-doctor
+    // carries the fixture's credential.
+    assert.equal(receipt.diff.removedEntries.length, 1, 'the redacted diff travels in the receipt');
+    assert.ok(receipt.reconstruction, 'the receipt carries reconstruction metadata instead of bytes');
+    assert.ok(!('preImagePath' in receipt), 'no plaintext pre-image path in the receipt');
+    assert.ok(!('preImage' in receipt), 'no plaintext pre-image bytes in the receipt');
+    assert.ok(!JSON.stringify(receipt).includes(HEAL_SECRET), 'the receipt never carries the credential');
+    assert.equal(existsSync(path.join(dir, '.mcp-doctor', 'pre-images')), false, 'no pre-image store exists at all');
+    const walk = (d) => {
+      for (const name of readdirSync(d)) {
+        const full = path.join(d, name);
+        if (statSync(full).isDirectory()) walk(full);
+        else assert.ok(!readFileSync(full, 'utf8').includes(HEAL_SECRET), `${full} leaked the credential`);
+      }
+    };
+    walk(path.join(dir, '.mcp-doctor'));
+
+    // §5.3: rollback still restores the byte-exact pre-image, proved by hash.
+    const { structuredContent: rolled } = await call(client, 'mcp_doctor_heal_rollback', { id: applied.receiptIds[0], configPath });
+    assert.equal(rolled.status, 'restored', JSON.stringify(rolled));
+    assert.equal(readFileSync(configPath, 'utf8'), healPreText, 'byte-exact pre-image restored');
+    assert.equal(
+      createHash('sha256').update(readFileSync(configPath)).digest('hex'),
+      applied.preImageSha256,
+      'sha256 equality with the receipt pre-image hash',
+    );
   } finally {
     await client.close();
   }
@@ -355,6 +404,17 @@ test('PRD-005 §4.5: modes lists every verb with its write class from the one sh
     assert.equal(planned.status, 1, 'the CLI proposes the repair (write class read-only still reports it)');
     assert.ok(strip(planned.stdout).includes('H1 QUARANTINE-DEAD dead'));
     assert.equal(readFileSync(configPath, 'utf8'), before, 'plan write class matches CLI behavior: nothing written');
+
+    // And the same verb proposes nothing when the history does not vouch for
+    // the entry: one observation is not death (surface A).
+    const quiet = healFixture({ seed: false });
+    const quietBefore = readFileSync(quiet.configPath, 'utf8');
+    const quietPlan = spawnSync(process.execPath, [path.join(here, '..', 'dist', 'cli.js'), 'heal', '--plan', '--config', quiet.configPath], {
+      env, cwd: quiet.dir, encoding: 'utf8', timeout: 45000,
+    });
+    assert.equal(quietPlan.status, 0, `a fresh registration must not be proposed: ${quietPlan.stdout}\n${quietPlan.stderr}`);
+    assert.ok(!strip(quietPlan.stdout).includes('H1 QUARANTINE-DEAD'), 'no repair without three recorded failures');
+    assert.equal(readFileSync(quiet.configPath, 'utf8'), quietBefore, 'the quiet plan writes nothing either');
   } finally {
     await client.close();
   }

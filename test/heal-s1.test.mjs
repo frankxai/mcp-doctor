@@ -1,7 +1,11 @@
 // S1 acceptance: H1 QUARANTINE-DEAD (PRD-001-heal criteria 1, 2, 3, 8) plus the
-// review fixes: deterministic death only (FIX 1), receipt/pre-image split (FIX 2,
-// §4.1), byte-surgery edge cases (FIX 3), artifact-first ordering and receipt
-// path validation (FIX 4, §4.2). All exercised end-to-end through the CLI.
+// review fixes: persisted failure history (A), receipts that carry no pre-image
+// and no secret (B), byte-surgery edge cases (C), artifact-first ordering and
+// receipt path validation (D). All exercised end-to-end through the CLI.
+//
+// The history store is seeded directly here so each acceptance test states its
+// own precondition; test/heal-s2.test.mjs proves the recording path itself with
+// real `audit` invocations.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -16,7 +20,8 @@ const root = path.resolve(here, "..");
 const cli = path.join(root, "dist", "cli.js");
 const fixture = path.join(here, "fixtures", "health-probe.mjs");
 
-const REASON = "MCP check failed (missing-command): Server command could not be started";
+const LAST_FAILURE = "2026-11-01T00:00:00.000Z";
+const REASON = `MCP check failed (missing-command) on 3 consecutive audit runs; last failure ${LAST_FAILURE}`;
 const DEAD_COMMAND = "mcp-doctor-h1-fixture-missing-binary";
 const SECRET = "sk-0000000000000000000000test";
 
@@ -35,12 +40,45 @@ const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex")
 const strip = (text) => (text ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 
 function envFor(home) {
-  return { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData"), LOCALAPPDATA: path.join(home, "LocalAppData"), XDG_CONFIG_HOME: path.join(home, ".config") };
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: path.join(home, "AppData"),
+    LOCALAPPDATA: path.join(home, "LocalAppData"),
+    XDG_CONFIG_HOME: path.join(home, ".config"),
+    MCP_DOCTOR_HEAL_MIN_INTERVAL_MS: "0",
+  };
 }
 
-function makeHome() {
+/** Write a durable history record exactly as the audit path would. */
+function seedFailure(home, name, rawValue, { count = 3, scope = "user", projectPath, configPath, status = "missing-command" } = {}) {
+  const target = configPath ?? path.join(home, ".claude.json");
+  const identity = `${target}\u0000${scope}\u0000${projectPath ?? ""}\u0000${name}`;
+  const storePath = path.join(home, ".mcp-doctor", "failure-history.json");
+  mkdirSync(path.dirname(storePath), { recursive: true });
+  const store = existsSync(storePath)
+    ? JSON.parse(readFileSync(storePath, "utf8"))
+    : { version: 1, records: {} };
+  store.records[identity] = {
+    server: name,
+    scope,
+    ...(projectPath !== undefined ? { projectPath } : {}),
+    configPath: target,
+    configHash: sha256(rawValue),
+    consecutiveFailures: count,
+    firstFailureAt: "2026-10-31T00:00:00.000Z",
+    lastFailureAt: LAST_FAILURE,
+    lastStatus: status,
+    run: "seed",
+  };
+  writeFileSync(storePath, JSON.stringify(store, null, 2), "utf8");
+}
+
+function makeHome({ seed = true } = {}) {
   const home = mkdtempSync(path.join(tmpdir(), "mcp-doctor-heal-"));
   writeFileSync(path.join(home, ".claude.json"), preText, "utf8");
+  if (seed) seedFailure(home, "dead", deadText);
   return home;
 }
 
@@ -77,17 +115,6 @@ function healReceipts(home) {
   return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")) : [];
 }
 
-function preImageStore(home) {
-  return path.join(home, ".mcp-doctor", "pre-images");
-}
-
-function preImages(home) {
-  const dir = preImageStore(home);
-  return existsSync(dir)
-    ? readdirSync(dir).filter((name) => name.endsWith(".json") && !name.includes(".tmp-"))
-    : [];
-}
-
 function configText(home) {
   return readFileSync(path.join(home, ".claude.json"), "utf8");
 }
@@ -103,7 +130,7 @@ test("heal --plan reports exactly one H1 repair and writes nothing (criterion 1)
   const h1Lines = result.out.match(/H1 QUARANTINE-DEAD/g) ?? [];
   assert.equal(h1Lines.length, 1, "plan must propose exactly one H1 repair");
   assert.ok(result.out.includes("dead "), result.out);
-  assert.ok(result.out.includes(REASON), "the plan states the deterministic-death reason");
+  assert.ok(result.out.includes(REASON), "the plan states the recorded-death reason");
   const after = dirFingerprints(home);
   assert.equal(JSON.stringify(before), JSON.stringify(after), "plan must not write a single byte");
 });
@@ -121,12 +148,13 @@ test("heal --apply changes exactly one entry, writes one receipt, leaves the res
   assert.equal(receipt.preImageSha256, sha256(preText));
   assert.equal(receipt.postImageSha256, sha256(expectedPostText));
   assert.ok(!/"preImage"/.test(JSON.stringify(receipt)), "§4.1: receipts never carry a preImage");
+  assert.ok(!/"preImagePath"/.test(JSON.stringify(receipt)), "§4.1: no external pre-image artifact is referenced");
   assert.ok(Array.isArray(receipt.diff?.removedEntries) && receipt.diff.removedEntries.length === 1, "receipt carries a redacted diff");
   assert.ok(Array.isArray(receipt.diff?.quarantinedEntries) && receipt.diff.quarantinedEntries.length === 1, "receipt carries a redacted diff");
-  assert.equal(receipt.preImagePath, path.join(home, ".mcp-doctor", "pre-images", `${expectedReceiptId}.json`), "§4.1: receipt references the pre-image by path");
-  const preImageBytes = readFileSync(receipt.preImagePath, "utf8");
-  assert.equal(preImageBytes, preText, "store holds the verbatim pre-image bytes");
-  assert.equal(sha256(preImageBytes), receipt.preImageSha256, "receipt hash matches the stored bytes");
+  assert.equal(receipt.reconstruction?.version, 1, "receipt carries the reconstruction record");
+  assert.equal(receipt.reconstruction.removals.length, 1);
+  assert.equal(receipt.reconstruction.removals[0].holes[0].name, "dead");
+  assert.ok(!existsSync(path.join(home, ".mcp-doctor", "pre-images")), "no pre-image store is written at all");
 });
 
 test("heal --apply twice is idempotent: no repairs, no new receipt (criterion 8)", limit, () => {
@@ -150,9 +178,10 @@ test("heal --rollback <id> restores a byte-identical pre-image (criterion 3)", l
   assert.equal(rollback.status, 0, rollback.stderr || rollback.out);
   assert.equal(configText(home), preText, "config restored byte-for-byte");
   assert.equal(sha256(configText(home)), sha256(preText), "sha256 equality");
+  assert.equal(rollback.out.includes("pre-image store"), false, "rollback says nothing about a store");
 });
 
-test("heal --rollback refuses when the live config is not the receipt's post-image", limit, () => {
+test("heal --rollback refuses drift, and --force refuses too rather than writing unproven bytes", limit, () => {
   const home = makeHome();
   assert.equal(runHeal(home, ["--apply"]).status, 2);
   writeFileSync(path.join(home, ".claude.json"), '{"mcpServers":{},"tampered":true}', "utf8");
@@ -162,13 +191,18 @@ test("heal --rollback refuses when the live config is not the receipt's post-ima
   assert.ok(refused.out.includes("refused"), refused.out);
   assert.equal(configText(home), '{"mcpServers":{},"tampered":true}', "refused rollback must not touch the live file");
 
+  // Without a stored pre-image, --force cannot fabricate bytes it cannot prove:
+  // it warns, tries to rebuild from quarantined[], and refuses when the
+  // quarantine block no longer exists.
   const forced = runHeal(home, ["--rollback", expectedReceiptId, "--force"]);
-  assert.equal(forced.status, 0, forced.stderr || forced.out);
-  assert.equal(configText(home), preText, "forced rollback restores the pre-image");
+  assert.equal(forced.status, 3, forced.stderr || forced.out);
+  assert.ok(forced.out.includes("refused"), forced.out);
+  assert.ok(forced.out.includes("intervening changes"), forced.out);
+  assert.equal(configText(home), '{"mcpServers":{},"tampered":true}', "a failed forced rollback writes nothing");
 });
 
 test("heal --plan on a healthy config is clean: exit 0, no H1, no writes", limit, () => {
-  const home = makeHome();
+  const home = makeHome({ seed: false });
   writeFileSync(path.join(home, ".claude.json"), `{"mcpServers":{"healthy":${healthyText},"placeholder-env":${placeholderText}}}`, "utf8");
   const before = dirFingerprints(home);
   const result = runHeal(home, ["--plan"]);
@@ -199,84 +233,89 @@ test("receipt ids are deterministic across apply/rollback cycles", limit, () => 
   assert.deepEqual(healReceipts(home), [`${expectedReceiptId}.json`], "same input config produced the same receipt id");
 });
 
-test("a timing-dead server is skipped as transient and never quarantined (FIX 1)", limit, () => {
-  const home = makeHome();
-  const silentConfig = { type: "stdio", command: process.execPath, args: [fixture, "silent"] };
-  const silentText = JSON.stringify(silentConfig);
-  const flaky = `{"mcpServers":{"healthy":${healthyText},"flaky":${silentText},"placeholder-env":${placeholderText}}}`;
-  writeFileSync(path.join(home, ".claude.json"), flaky, "utf8");
+test("a partial failure history is not death: 2/3 proposes nothing (surface A)", limit, () => {
+  const home = makeHome({ seed: false });
+  seedFailure(home, "dead", deadText, { count: 2 });
+  const before = dirFingerprints(home);
 
   const planRun = runHeal(home, ["--plan"]);
   assert.equal(planRun.status, 0, planRun.stderr || planRun.out);
-  assert.equal((planRun.out.match(/H1 QUARANTINE-DEAD/g) ?? []).length, 0, "a timeout must never become an H1 repair");
-  assert.ok(planRun.out.includes("transient: needs failure history (S2)"), planRun.out);
+  assert.equal((planRun.out.match(/H1 QUARANTINE-DEAD/g) ?? []).length, 0, "2 of 3 consecutive failures must not quarantine");
+  assert.ok(planRun.out.includes("2/3 consecutive failed checks"), planRun.out);
+  assert.equal(JSON.stringify(before), JSON.stringify(dirFingerprints(home)), "plan still writes nothing");
 
   const applyRun = runHeal(home, ["--apply"]);
   assert.equal(applyRun.status, 0, applyRun.stderr || applyRun.out);
-  assert.equal(healReceipts(home).length, 0, "a transient server never produces a receipt");
-  assert.equal(configText(home), flaky, "apply must not touch the config when only a timing blip exists");
+  assert.equal(healReceipts(home).length, 0, "a partial history never produces a receipt");
+  assert.equal(configText(home), preText, "the config is untouched below the threshold");
 });
 
-test("receipts stay credential-free; the pre-image store holds the verbatim bytes at 0600 (FIX 2, §4.1)", limit, () => {
+test("history is keyed by the registration bytes: an edited entry starts over (surface A)", limit, () => {
+  const home = makeHome({ seed: false });
+  const edited = { type: "stdio", command: DEAD_COMMAND, args: ["--changed"] };
+  seedFailure(home, "dead", JSON.stringify(edited), { count: 3 });
+  // The config still declares the old bytes for "dead", so the seeded hash does
+  // not match and the three old failures do not transfer to this registration.
+  const result = runHeal(home, ["--plan"]);
+  assert.equal(result.status, 0, result.stderr || result.out);
+  assert.equal((result.out.match(/H1 QUARANTINE-DEAD/g) ?? []).length, 0, result.out);
+});
+
+test("receipts and history stay credential-free; rollback is still byte-exact (surface B)", limit, () => {
   const home = mkdtempSync(path.join(tmpdir(), "mcp-doctor-heal-"));
   const deadSecret = { type: "stdio", command: DEAD_COMMAND, env: { API_KEY: SECRET } };
   const deadSecretText = JSON.stringify(deadSecret);
   const secretPre = `{"mcpServers":{"healthy":${healthyText},"dead":${deadSecretText},"placeholder-env":${placeholderText}}}`;
   writeFileSync(path.join(home, ".claude.json"), secretPre, "utf8");
+  seedFailure(home, "dead", deadSecretText);
 
   const result = runHeal(home, ["--apply"]);
   assert.equal(result.status, 2, result.stderr || result.out);
 
-  // (a) No artifact a user is invited to paste carries the literal.
-  const healDir = path.join(home, ".mcp-doctor", "heal");
-  for (const name of readdirSync(healDir)) {
-    const content = readFileSync(path.join(healDir, name), "utf8");
-    assert.ok(!content.includes(SECRET), `.mcp-doctor/heal/${name} leaked the credential`);
-    assert.ok(!/"preImage"/.test(content), `${name} must not carry a preImage field`);
-  }
+  // (a) No file anywhere under .mcp-doctor carries the literal, receipts and
+  //     history store included.
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else assert.ok(!readFileSync(full, "utf8").includes(SECRET), `${full} leaked the credential`);
+    }
+  };
+  walk(path.join(home, ".mcp-doctor"));
   assert.equal(healReceipts(home).length, 1, "exactly one receipt");
+  assert.equal(existsSync(path.join(home, ".mcp-doctor", "pre-images")), false, "no pre-image store exists to leak it");
 
-  // (b) The store holds the verbatim bytes under the home, outside the receipts.
-  const stored = preImages(home);
-  assert.equal(stored.length, 1, "exactly one pre-image in the store");
-  const preImagePath = path.join(preImageStore(home), stored[0]);
-  assert.equal(readFileSync(preImagePath, "utf8"), secretPre, "pre-image store is byte-verbatim");
-  if (process.platform !== "win32") {
-    assert.equal(statSync(preImagePath).mode & 0o777, 0o600, "pre-image mode must be 0600");
-  } else {
-    assert.ok(existsSync(preImagePath), "pre-image exists (Windows chmod carries only the read-only bit)");
-  }
-  const receipt = JSON.parse(readFileSync(path.join(healDir, healReceipts(home)[0]), "utf8"));
-  assert.equal(receipt.preImagePath, preImagePath, "receipt points at the home store, not the config dir");
-
-  // (c) Rollback still restores byte-exactly from the store.
+  // (b) Rollback rebuilds the byte-exact pre-image from quarantined[].
+  const receipt = JSON.parse(readFileSync(path.join(home, ".mcp-doctor", "heal", healReceipts(home)[0]), "utf8"));
   const restored = runHeal(home, ["--rollback", receipt.id]);
   assert.equal(restored.status, 0, restored.stderr || restored.out);
   assert.equal(configText(home), secretPre, "rollback restored the byte-exact pre-image including its own env keys");
+  assert.equal(sha256(configText(home)), sha256(secretPre), "sha256 equality");
 });
 
-test("rollback refuses when the pre-image store is tampered (FIX 2)", limit, () => {
+test("rollback refuses when quarantined[] no longer matches the recorded bytes (surface B)", limit, () => {
   const home = makeHome();
   assert.equal(runHeal(home, ["--apply"]).status, 2);
-  const file = path.join(preImageStore(home), preImages(home)[0]);
-  writeFileSync(file, readFileSync(file, "utf8") + "\n", "utf8"); // corrupt the bytes
+  const tampered = configText(home).replace(DEAD_COMMAND, "some-other-command");
+  writeFileSync(path.join(home, ".claude.json"), tampered, "utf8");
 
-  const tampered = runHeal(home, ["--rollback", expectedReceiptId]);
-  assert.equal(tampered.status, 3, tampered.stderr || tampered.out);
-  assert.ok(tampered.out.includes("refused"), tampered.out);
+  const result = runHeal(home, ["--rollback", expectedReceiptId]);
+  assert.equal(result.status, 3, result.stderr || result.out);
+  assert.ok(result.out.includes("refused"), result.out);
+  assert.equal(configText(home), tampered, "refused rollback wrote nothing");
 });
 
-test("rollback refuses when the pre-image is missing from the store (FIX 2)", limit, () => {
+test("rollback refuses when the quarantine block was removed (surface B)", limit, () => {
   const home = makeHome();
   assert.equal(runHeal(home, ["--apply"]).status, 2);
-  unlinkSync(path.join(preImageStore(home), preImages(home)[0]));
+  writeFileSync(path.join(home, ".claude.json"), `{"mcpServers":{"healthy":${healthyText},"placeholder-env":${placeholderText}}}`, "utf8");
 
   const missing = runHeal(home, ["--rollback", expectedReceiptId]);
   assert.equal(missing.status, 3, missing.stderr || missing.out);
   assert.ok(missing.out.includes("refused"), missing.out);
 });
 
-test("rollback refuses a receipt whose target is another config path (FIX 4, §4.2)", limit, () => {
+test("rollback refuses a receipt whose target is another config path (surface D, §4.2)", limit, () => {
   const homeA = makeHome();
   assert.equal(runHeal(homeA, ["--apply"]).status, 2);
   const homeB = mkdtempSync(path.join(tmpdir(), "mcp-doctor-heal-b-"));
@@ -294,7 +333,7 @@ test("rollback refuses a receipt whose target is another config path (FIX 4, §4
   assert.equal(configText(homeB), preText, "a planted receipt must not redirect a write");
 });
 
-test("byte surgery survives adjacency, CRLF, escapes and pre-existing quarantined[] (FIX 3)", limit, () => {
+test("byte surgery survives every dead position, adjacency, CRLF, escapes and pre-existing quarantined[] (surface C)", limit, () => {
   const quarantinedTextFor = (name) =>
     `{"name":"${name}","config":${deadText},"reason":${JSON.stringify(REASON)}}`;
   const cases = [
@@ -303,6 +342,7 @@ test("byte surgery survives adjacency, CRLF, escapes and pre-existing quarantine
     { label: "dead middle", members: `"alive":${healthyText},"dead":${deadText},"alive2":${healthyText}`, alive: ["alive", "alive2"], quarantined: ["dead"] },
     { label: "dead only member", members: `"dead":${deadText}`, alive: [], quarantined: ["dead"] },
     { label: "two adjacent dead at end", members: `"alive":${healthyText},"d1":${deadText},"d2":${deadText}`, alive: ["alive"], quarantined: ["d1", "d2"] },
+    { label: "two adjacent dead in the middle", members: `"a":${healthyText},"d1":${deadText},"d2":${deadText},"z":${healthyText}`, alive: ["a", "z"], quarantined: ["d1", "d2"] },
     { label: "three adjacent dead at end", members: `"alive":${healthyText},"d1":${deadText},"d2":${deadText},"d3":${deadText}`, alive: ["alive"], quarantined: ["d1", "d2", "d3"] },
     { label: "pre-existing non-empty quarantined", doc: `{"quarantined":[{"name":"old","config":{"note":"x"}}],"mcpServers":{"alive":${healthyText},"dead":${deadText}}}`, members: null, alive: ["alive"], quarantined: ["old", "dead"] },
     { label: "pre-existing empty quarantined", doc: `{"quarantined":[],"mcpServers":{"alive":${healthyText},"dead":${deadText}}}`, members: null, alive: ["alive"], quarantined: ["dead"] },
@@ -312,45 +352,54 @@ test("byte surgery survives adjacency, CRLF, escapes and pre-existing quarantine
     const home = mkdtempSync(path.join(tmpdir(), "mcp-doctor-surgery-"));
     const doc = c.members === null ? c.doc : `{"mcpServers":{${c.members}}}`;
     writeFileSync(path.join(home, ".claude.json"), doc, "utf8");
+    for (const dead of c.quarantined) {
+      if (dead === "old") continue;
+      seedFailure(home, dead, deadText);
+    }
 
     const result = runHeal(home, ["--apply"]);
     assert.equal(result.status, 2, `${c.label}: ${result.err}`);
     const post = configText(home);
     const parsed = JSON.parse(post); // (1) the result must parse
-    assert.deepEqual(Object.keys(parsed.mcpServers ?? {}).sort(), c.alive.slice().sort(), `${c.label}: (2) survivors exact`);
-    assert.deepEqual((parsed.quarantined ?? []).map((q) => q.name), c.quarantined, `${c.label}: (3) quarantined names`);
+    assert.ok(!/,\s*}/.test(post), `${c.label}: (2) no dangling comma before a brace`);
+    assert.deepEqual(Object.keys(parsed.mcpServers ?? {}).sort(), c.alive.slice().sort(), `${c.label}: (3) survivors exact`);
+    assert.deepEqual((parsed.quarantined ?? []).map((q) => q.name), c.quarantined, `${c.label}: (4) quarantined names`);
     if (c.alive.length > 0) {
-      assert.ok(post.includes(healthyText), `${c.label}: (4) surviving member bytes intact`);
+      assert.ok(post.includes(healthyText), `${c.label}: (5) surviving member bytes intact`);
     }
     for (const dead of c.quarantined) {
       if (dead === "old") continue;
-      assert.ok(post.includes(quarantinedTextFor(dead)), `${c.label}: (5) ${dead} quarantined verbatim`);
+      assert.ok(post.includes(quarantinedTextFor(dead)), `${c.label}: (6) ${dead} quarantined verbatim`);
     }
+
+    // And every one of those shapes still rolls back byte-exactly.
+    const id = healReceipts(home)[0].replace(/\.json$/, "");
+    const rollback = runHeal(home, ["--rollback", id]);
+    assert.equal(rollback.status, 0, `${c.label} rollback: ${rollback.err || rollback.out}`);
+    assert.equal(configText(home), doc, `${c.label}: byte-exact pre-image restored`);
   }
 
-  // CRLF file with a dead middle member
+  // CRLF file with a dead member between live ones.
   const crlfHome = mkdtempSync(path.join(tmpdir(), "mcp-doctor-crlf-"));
-  writeFileSync(
-    path.join(crlfHome, ".claude.json"),
-    `{\r\n  "mcpServers": {\r\n    "alive": ${healthyText},\r\n    "dead": ${deadText}\r\n  }\r\n}`,
-    "utf8"
-  );
+  const crlfDoc = `{\r\n  "mcpServers": {\r\n    "alive": ${healthyText},\r\n    "dead": ${deadText}\r\n  }\r\n}`;
+  writeFileSync(path.join(crlfHome, ".claude.json"), crlfDoc, "utf8");
+  seedFailure(crlfHome, "dead", deadText);
   const crlfRun = runHeal(crlfHome, ["--apply"]);
   assert.equal(crlfRun.status, 2, crlfRun.err);
   const crlfParsed = JSON.parse(configText(crlfHome));
   assert.deepEqual(crlfParsed.mcpServers.alive, healthyConfig, "CRLF: live value intact");
   assert.deepEqual((crlfParsed.quarantined ?? []).map((q) => q.name), ["dead"], "CRLF: dead quarantined");
+  assert.equal(runHeal(crlfHome, ["--rollback", healReceipts(crlfHome)[0].replace(/\.json$/, "")]).status, 0);
+  assert.equal(configText(crlfHome), crlfDoc, "CRLF: byte-exact rollback, newlines included");
 
-  // strings containing escaped braces, commas and quotes
+  // Strings containing escaped braces, commas, quotes and backslashes.
   const evilArg = '{"a":1,"b":"}\\"","}":2}';
   const evilHealthy = { type: "stdio", command: process.execPath, args: [fixture, "success", evilArg] };
   const evilDead = { type: "stdio", command: DEAD_COMMAND, args: [evilArg, ']"},{'] };
   const evilHome = mkdtempSync(path.join(tmpdir(), "mcp-doctor-escapes-"));
-  writeFileSync(
-    path.join(evilHome, ".claude.json"),
-    `{"mcpServers":{"alive":${JSON.stringify(evilHealthy)},"dead":${JSON.stringify(evilDead)}}}`,
-    "utf8"
-  );
+  const evilDoc = `{"mcpServers":{"alive":${JSON.stringify(evilHealthy)},"dead":${JSON.stringify(evilDead)}}}`;
+  writeFileSync(path.join(evilHome, ".claude.json"), evilDoc, "utf8");
+  seedFailure(evilHome, "dead", JSON.stringify(evilDead));
   const evilRun = runHeal(evilHome, ["--apply"]);
   assert.equal(evilRun.status, 2, evilRun.err);
   const evilParsed = JSON.parse(configText(evilHome)); // braces/commas/quotes inside strings survive the scanner
@@ -395,6 +444,7 @@ test("§4.3: heal --apply --config <file> proceeds without --yes (naming the fil
   const target = path.join(home, "configs", "claude.json");
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, preText, "utf8");
+  seedFailure(home, "dead", deadText, { configPath: target });
 
   const result = runHeal(home, ["--apply", "--config", target]);
   assert.equal(result.status, 2, result.err || result.out);
