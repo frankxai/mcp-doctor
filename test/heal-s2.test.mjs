@@ -382,30 +382,75 @@ test("D: the artifact writer leaves no temp file and replaces contents in one st
   assert.deepEqual(readdirSync(receiptDir).filter((name) => name.includes(".tmp-")), [], "no temp file survives a receipt write");
 });
 
-test("D: config mode is preserved and a symlinked profile survives apply and rollback (finding 4)", { timeout: 120000, skip: process.platform === "win32" ? "symlinks need privileges on Windows" : false }, () => {
+test("D: config mode is preserved and a symlinked profile survives apply and rollback (finding 4)", { timeout: 120000 }, () => {
   const home = mkdtempSync(path.join(tmpdir(), "mcp-doctor-symlink-"));
   const real = path.join(home, "real-claude.json");
   const link = path.join(home, ".claude.json");
   writeFileSync(real, preText, "utf8");
   chmodSync(real, 0o600);
-  symlinkSync(real, link);
+
+  // Windows without Developer Mode refuses file symlinks (EPERM), which is a
+  // privilege limit, not a code path. Fall back to a regular config there so
+  // the structural assertions below still run on this host; the link and mode
+  // assertions stay gated, and POSIX must always get a real link.
+  let linked = true;
+  try {
+    symlinkSync(real, link);
+  } catch (error) {
+    if (process.platform !== "win32" || !["EPERM", "EACCES", "EINVAL"].includes(error.code)) throw error;
+    writeFileSync(link, preText, "utf8");
+    linked = false;
+  }
+  if (process.platform !== "win32") assert.equal(linked, true, "the fixture must be a real symlink on POSIX");
+  const config = linked ? real : link;
 
   for (let i = 0; i < 3; i++) assert.equal(audit(home).status, 0);
 
   const applied = apply(home);
   assert.equal(applied.status, 2, applied.err || applied.out);
-  assert.equal(lstatSync(link).isSymbolicLink(), true, "the user's symlink is still a symlink");
-  assert.equal(statSync(real).mode & 0o777, 0o600, "the config keeps its restrictive mode through the write");
-  assert.equal(readFileSync(real, "utf8").includes('"dead"'), false, "the linked file received the post-image");
+  if (linked) {
+    assert.equal(lstatSync(link).isSymbolicLink(), true, "the user's symlink is still a symlink");
+  }
+
+  // The post-image moved the entry into quarantined[]. Ask the parsed document,
+  // not a substring: `"dead"` also occurs as the quarantine entry's name, and
+  // `"dead":` is a member-key check that a substring can satisfy for the wrong
+  // reason. The structural facts are: gone from mcpServers, present once in
+  // quarantined[] with its name and config intact.
+  const post = JSON.parse(readFileSync(config, "utf8"));
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(post.mcpServers ?? {}, "dead"),
+    false,
+    "the dead server is no longer a member of mcpServers",
+  );
+  assert.equal(Array.isArray(post.quarantined), true, "quarantined[] is an array");
+  assert.equal(post.quarantined.length, 1, "exactly one entry moved into quarantined[]");
+  assert.equal(post.quarantined[0].name, "dead", "the quarantined entry preserves the server name");
+  assert.deepEqual(post.quarantined[0].config, deadConfig, "and its config, intact");
+
+  if (!linked) {
+    // The fallback file is the config the run wrote, so the same structural
+    // facts are proven on this host; only symlink identity and POSIX mode wait.
+    assert.equal(readFileSync(config, "utf8").includes('"dead":'), false, "the member key is gone from the file");
+  }
+  if (process.platform !== "win32") {
+    assert.equal(statSync(config).mode & 0o777, 0o600, "the config keeps its restrictive mode through the write");
+  }
 
   const receiptName = readdirSync(path.join(home, ".mcp-doctor", "heal")).find((n) => n.endsWith(".json"));
-  assert.equal(statSync(path.join(home, ".mcp-doctor", "heal", receiptName)).mode & 0o777, 0o600, "receipts are 0600");
+  if (process.platform !== "win32") {
+    assert.equal(statSync(path.join(home, ".mcp-doctor", "heal", receiptName)).mode & 0o777, 0o600, "receipts are 0600");
+  }
 
   const rolled = run(home, ["heal", "--rollback", receiptName.replace(/\.json$/, ""), "--config", link]);
   assert.equal(rolled.status, 0, rolled.err || rolled.out);
-  assert.equal(lstatSync(link).isSymbolicLink(), true, "rollback keeps the link too");
-  assert.equal(statSync(real).mode & 0o777, 0o600);
-  assert.equal(readFileSync(real, "utf8"), preText, "byte-exact through the symlink");
+  if (linked) {
+    assert.equal(lstatSync(link).isSymbolicLink(), true, "rollback keeps the link too");
+  }
+  if (process.platform !== "win32") {
+    assert.equal(statSync(config).mode & 0o777, 0o600);
+  }
+  assert.equal(readFileSync(config, "utf8"), preText, "byte-exact pre-image restored through the config path");
 });
 
 test("D: receipts are written before the config; a blocked receipt leaves the config untouched", limit, () => {
