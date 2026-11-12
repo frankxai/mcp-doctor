@@ -85,7 +85,7 @@ const healPlanItemSchema = z.object({
 const healSkippedSchema = z.object({
   server: z.string(),
   scope: z.enum(["user", "project-local"]),
-  skipClass: z.enum(["unauthenticated", "remote-untested", "transient"]),
+  skipClass: z.enum(["unauthenticated", "remote-untested", "transient", "misconfigured"]),
   message: z.string(),
 });
 

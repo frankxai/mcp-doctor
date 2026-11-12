@@ -11,8 +11,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -90,6 +100,38 @@ function configText(home) {
 }
 
 // ---------------------------------------------------------------- surface A
+
+test("A: a misconfigured entry is reported, never counted as dead (finding 2)", limit, () => {
+  // No command at all: the old classification called this `broken`, heal counted
+  // it, and three audits would have quarantined a config a human must fix.
+  const doc = `{"mcpServers":{"healthy":${healthyText},"no-command":{"type":"stdio"}}}`;
+  const home = makeHome(doc);
+  for (let i = 0; i < 3; i++) assert.equal(audit(home).status, 0);
+
+  assert.equal(recordFor(home, "no-command"), undefined, "a malformed entry is not failure evidence");
+  const planned = plan(home);
+  assert.equal(planned.status, 0, planned.out);
+  assert.equal((planned.out.match(/H1 QUARANTINE-DEAD/g) ?? []).length, 0, "a misconfigured server is never quarantined");
+  assert.ok(planned.out.includes("misconfigured: No command configured"), planned.out);
+  assert.equal(apply(home).status, 0);
+  assert.equal(configText(home), doc, "the user's configuration is intact");
+});
+
+test("A: a probe failure that is not a missing binary is not death (finding 2)", limit, () => {
+  // The command exists and starts, then fails the handshake. This is the shape
+  // of an offline npx, an expired upstream token or a bad protocol version.
+  const failing = { type: "stdio", command: process.execPath, args: ["-e", "process.exit(1)"] };
+  const doc = `{"mcpServers":{"healthy":${healthyText},"failing":${JSON.stringify(failing)}}}`;
+  const home = makeHome(doc);
+  for (let i = 0; i < 3; i++) assert.equal(audit(home).status, 0);
+
+  assert.equal(recordFor(home, "failing"), undefined, "a `broken` probe is not a counted failure");
+  const planned = plan(home);
+  assert.equal(planned.status, 0, planned.out);
+  assert.equal((planned.out.match(/H1 QUARANTINE-DEAD/g) ?? []).length, 0);
+  assert.equal(apply(home).status, 0);
+  assert.equal(configText(home), doc);
+});
 
 test("A: one failed check does not quarantine; three separate invocations do", limit, () => {
   const home = makeHome();
@@ -227,6 +269,44 @@ test("B: no file under .mcp-doctor carries the literal credential, and rollback 
   assert.equal(sha256(configText(home)), sha256(doc));
 });
 
+test("B: a credential in args reaches no artifact; the receipt stays structural (finding 1)", limit, () => {
+  // The reviewer's reproduction: a password in an argument after a flag whose
+  // name matches neither redaction heuristic. The old receipt copied the raw
+  // entry and leaked this value verbatim.
+  const credential = "pgpasswordZx9SecretValue";
+  const connection = `postgres://admin:${credential}@db.internal:5432/prod`;
+  const entry = { type: "stdio", command: "definitely-not-a-real-binary-xyz", args: ["--connection-string", connection] };
+  const doc = `{"mcpServers":{"DEAD_DB":${JSON.stringify(entry)}}}`;
+  const home = makeHome(doc);
+  for (let i = 0; i < 3; i++) assert.equal(audit(home).status, 0, "the absent binary is a counted failure");
+
+  const applied = apply(home);
+  assert.equal(applied.status, 2, applied.err || applied.out);
+
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else assert.ok(!readFileSync(full, "utf8").includes(credential), `${full} leaked the credential`);
+    }
+  };
+  walk(path.join(home, ".mcp-doctor"));
+
+  const receiptName = readdirSync(path.join(home, ".mcp-doctor", "heal")).find((n) => n.endsWith(".json"));
+  const receiptText = readFileSync(path.join(home, ".mcp-doctor", "heal", receiptName), "utf8");
+  assert.ok(!receiptText.includes(credential), "the receipt carries no credential value");
+  assert.ok(!receiptText.includes("postgres://"), "not even the URL shape survives in the receipt");
+
+  const receipt = JSON.parse(receiptText);
+  assert.equal(receipt.server, "DEAD_DB", "a reader can still tell which server moved");
+  assert.deepEqual(receipt.diff.removedEntries[0].keys, ["type", "command", "args"], "and what settings it had");
+  const argRef = receipt.diff.removedEntries[0].values.find((v) => v.path === "args[1]");
+  assert.ok(argRef, "the argument value is represented");
+  assert.equal(argRef.type, "string");
+  assert.match(argRef.sha256, /^[a-f0-9]{64}$/, "as a hash reference, not a value");
+  assert.equal(argRef.sha256, sha256(JSON.stringify(connection)), "the hash identifies the exact value");
+});
+
 test("B: a receipt cannot redirect a rollback to a path the user did not name", limit, () => {
   const home = makeHome();
   audit(home);
@@ -291,6 +371,42 @@ test("C: CRLF and escaped bytes survive apply and rollback byte-exactly", limit,
 });
 
 // ---------------------------------------------------------------- surface D
+
+test("D: the artifact writer leaves no temp file and replaces contents in one step", limit, () => {
+  const home = makeHome();
+  for (let i = 0; i < 3; i++) audit(home);
+  assert.equal(apply(home).status, 2);
+  const leftovers = readdirSync(home).filter((name) => name.includes(".tmp-"));
+  assert.deepEqual(leftovers, [], "no temp file survives the config write");
+  const receiptDir = path.join(home, ".mcp-doctor", "heal");
+  assert.deepEqual(readdirSync(receiptDir).filter((name) => name.includes(".tmp-")), [], "no temp file survives a receipt write");
+});
+
+test("D: config mode is preserved and a symlinked profile survives apply and rollback (finding 4)", { timeout: 120000, skip: process.platform === "win32" ? "symlinks need privileges on Windows" : false }, () => {
+  const home = mkdtempSync(path.join(tmpdir(), "mcp-doctor-symlink-"));
+  const real = path.join(home, "real-claude.json");
+  const link = path.join(home, ".claude.json");
+  writeFileSync(real, preText, "utf8");
+  chmodSync(real, 0o600);
+  symlinkSync(real, link);
+
+  for (let i = 0; i < 3; i++) assert.equal(audit(home).status, 0);
+
+  const applied = apply(home);
+  assert.equal(applied.status, 2, applied.err || applied.out);
+  assert.equal(lstatSync(link).isSymbolicLink(), true, "the user's symlink is still a symlink");
+  assert.equal(statSync(real).mode & 0o777, 0o600, "the config keeps its restrictive mode through the write");
+  assert.equal(readFileSync(real, "utf8").includes('"dead"'), false, "the linked file received the post-image");
+
+  const receiptName = readdirSync(path.join(home, ".mcp-doctor", "heal")).find((n) => n.endsWith(".json"));
+  assert.equal(statSync(path.join(home, ".mcp-doctor", "heal", receiptName)).mode & 0o777, 0o600, "receipts are 0600");
+
+  const rolled = run(home, ["heal", "--rollback", receiptName.replace(/\.json$/, ""), "--config", link]);
+  assert.equal(rolled.status, 0, rolled.err || rolled.out);
+  assert.equal(lstatSync(link).isSymbolicLink(), true, "rollback keeps the link too");
+  assert.equal(statSync(real).mode & 0o777, 0o600);
+  assert.equal(readFileSync(real, "utf8"), preText, "byte-exact through the symlink");
+});
 
 test("D: receipts are written before the config; a blocked receipt leaves the config untouched", limit, () => {
   const home = makeHome();

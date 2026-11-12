@@ -4,6 +4,7 @@
 // `audit` records, so `--plan` and `--apply` decide from the same evidence and
 // cannot disagree (PRD-001 §3 H1, review surface A).
 import { existsSync, readFileSync } from "fs";
+import { configProblem } from "../scanner/health-checker.js";
 import { getClaudeConfigPath } from "../scanner/config-reader.js";
 import {
   FAILURES_REQUIRED,
@@ -86,17 +87,6 @@ function isRemote(target: ScanTarget): boolean {
   return !!config && (config.type === "sse" || config.type === "streamable-http");
 }
 
-/** Structural only: a placeholder env value is a human's job, never a repair. */
-function unconfiguredEnv(target: ScanTarget): string | undefined {
-  const config = target.config as { env?: Record<string, unknown> } | null;
-  for (const [key, value] of Object.entries(config?.env ?? {})) {
-    if (typeof value !== "string" || !value || value.startsWith("YOUR_") || value === "undefined") {
-      return `Environment variable ${key} is not configured`;
-    }
-  }
-  return undefined;
-}
-
 function sourceOf(target: ScanTarget): HealSourceEntry {
   return {
     name: target.name,
@@ -120,6 +110,19 @@ export async function planFromText(text: string, configPath: string, options: Pl
   const store = options.store ?? readFailureStore(options.home);
 
   for (const target of scanHealTargets(text, configPath)) {
+    // Structural defects first: a malformed entry cannot be probed, and calling
+    // it dead would destroy the user's configuration instead of diagnosing it
+    // (review finding 2). It is reported as a distinct, non-quarantine class.
+    const problem = configProblem(target.config);
+    if (problem) {
+      plan.skipped.push({
+        source: sourceOf(target),
+        skipClass: problem.kind === "missing-env" ? "unauthenticated" : "misconfigured",
+        message: problem.kind === "missing-env" ? problem.message : `misconfigured: ${problem.message}`,
+      });
+      continue;
+    }
+
     if (isRemote(target)) {
       plan.skipped.push({ source: sourceOf(target), skipClass: "remote-untested", message: "remote protocol; heal probes stdio only" });
       continue;
@@ -148,12 +151,6 @@ export async function planFromText(text: string, configPath: string, options: Pl
         skipClass: "transient",
         message: `${count}/${FAILURES_REQUIRED} consecutive failed checks (${record.lastStatus} at ${record.lastFailureAt}); run mcp-doctor audit to record another`,
       });
-      continue;
-    }
-
-    const missingEnv = unconfiguredEnv(target);
-    if (missingEnv) {
-      plan.skipped.push({ source: sourceOf(target), skipClass: "unauthenticated", message: missingEnv });
     }
   }
   return plan;

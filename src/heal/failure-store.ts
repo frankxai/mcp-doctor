@@ -37,8 +37,14 @@ const MAX_RECORDS = 500;
 
 export type ProbeStatus = "healthy" | "broken" | "timeout" | "missing-command" | "missing-env" | "unchecked";
 
-/** A failure class that means the server is gone, not merely slow. */
-const DEAD_STATUSES: ProbeStatus[] = ["missing-command", "broken"];
+/**
+ * A failure class that means the server is gone, not merely slow, misconfigured
+ * or unreachable. Only `missing-command` qualifies: the binary a stdio entry
+ * names does not exist. `broken` covers probe errors (soft close, offline npx,
+ * an expired upstream token, a protocol mismatch) and config-validation
+ * failures, none of which justify disabling a working entry (review finding 2).
+ */
+const DEAD_STATUSES: ProbeStatus[] = ["missing-command"];
 
 export interface FailureRecord {
   server: string;
@@ -142,10 +148,11 @@ function prune(store: FailureStore, now: number): void {
  * Record one check run (one `audit` invocation) against the store.
  *
  * - `healthy` resets the count to zero and forgets the record.
- * - `missing-command` / `broken` increment it, at most once per run id, and
- *   only when at least `intervalMs` has passed since the last counted failure.
- * - `timeout`, `missing-env` and `unchecked` are not evidence either way: they
- *   neither increment nor reset, so a slow server is never quarantined.
+ * - `missing-command` increments it, at most once per run id, and only when at
+ *   least `intervalMs` has passed since the last counted failure.
+ * - `broken`, `timeout`, `missing-env` and `unchecked` are not evidence either
+ *   way: they neither increment nor reset, so a slow, misconfigured or merely
+ *   unreachable server is never quarantined.
  */
 export function recordCheckRun(options: RecordOptions): FailureStore {
   const home = options.home ?? homedir();
