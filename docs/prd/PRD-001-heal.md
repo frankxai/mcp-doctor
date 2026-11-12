@@ -67,16 +67,26 @@ That is the honest ceiling and it matches the measured reality: 19 of 60 connect
 ### 4.1 Pre-images are not receipts
 
 A byte-exact pre-image of a config can contain literal env values. It therefore may not be embedded
-in a receipt, which is the artifact a user is invited to read and paste. The split is:
+in a receipt, which is the artifact a user is invited to read and paste.
 
-| Artifact | Location | Contents | Mode |
-|---|---|---|---|
-| receipt | `.mcp-doctor/heal/<id>.json` | id, rung, server name, both sha256s, redacted diff, target path | readable, gitignored |
-| pre-image | `~/.mcp-doctor/pre-images/<id>.json` | the verbatim bytes, nothing else | `0600`, outside every repo |
-
-A receipt references the pre-image by id and hash. `rollback` reads the pre-image store and verifies
-the hash before writing. Deleting the store makes rollback refuse with exit 3; it never falls back to
-a partial restore.
+> **Revised 2026-11-12 (review surface B).** The original design split the two artifacts: a
+> readable receipt plus a `0600` pre-image store under `~/.mcp-doctor/pre-images/`, holding the
+> verbatim bytes. That still put credential bytes on disk, which conflicts with the non-goal above
+> and the requirement that no secret value reaches any output or receipt. The split is therefore
+> gone. There is no pre-image store and no verbatim-bytes artifact. The receipt carries hashes, a
+> redacted diff, and a hole-punched template of exactly what was removed, and `rollback` rebuilds
+> the pre-image from that template plus the live `quarantined[]` block.
+>
+> | Artifact | Location | Contents | Mode |
+> |---|---|---|---|
+> | receipt | `.mcp-doctor/heal/<id>.json` | id, rung, server name, both sha256s, redacted diff, hole-punched template, target path | readable, gitignored |
+> | failure history | `~/.mcp-doctor/failure-history.json` | counts, ids, timestamps, status classes, registration hashes | `0600`, outside every repo |
+>
+> Rollback rebuilds the pre-image and verifies it against the recorded sha256 before writing. When
+> the reconstruction cannot be proven byte-exact it refuses with exit 3 rather than writing
+> unproven bytes. A deleted or mismatched `quarantined[]` entry therefore refuses the rollback
+> instead of restoring something partial, and `--force` cannot override it: there is no stored
+> pre-image to force against.
 
 ### 4.3 The target is named before it is written
 

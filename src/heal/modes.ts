@@ -72,13 +72,13 @@ export const DOCTOR_VERBS: DoctorVerbRow[] = [
     mapsTo: "heal --apply --config <path> --yes",
     writeClass: "named-config-write",
     target: "the config named by configPath (required; never the ambient profile)",
-    writes: "the named config only: dead entries quarantined byte-surgically, receipts and 0600 pre-images recorded beside it",
+    writes: "the named config only: dead entries quarantined byte-surgically, and a receipt recording hashes, a redacted diff and a hole-punched template beside it",
   },
   {
     verb: "mcp_doctor_heal_rollback",
     mapsTo: "heal --rollback <id> --config <path>",
     writeClass: "named-config-write",
     target: "the config named by configPath (required; a receipt naming any other path is refused)",
-    writes: "the named config only, restored byte-exactly from the receipt's 0600 pre-image",
+    writes: "the named config only, restored byte-exactly by rebuilding the pre-image from the receipt's template and the live quarantine block",
   },
 ];
