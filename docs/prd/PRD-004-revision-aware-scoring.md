@@ -1,10 +1,26 @@
 # PRD-004 — grade against a revision, not an opinion
 
-- **Status:** draft for review, 2026-11-08
+- **Status:** draft for review, 2026-11-08. **§1 and §4 premise corrected 2026-11-12 — see
+  `PRD-006-speak-2026-07-28.md`.**
 - **Owner:** opencode lane `opencode-7cb2ad7f`
 - **Target release:** 0.6.0 (ships with PRD-001)
 - **Evidence:** `docs/research/mcp-tool-quality-2026-11-08.md`, plus primary sources re-checked by the
   orchestrator on 2026-11-08
+
+> **Correction, 2026-11-12 (PRD-006 §1).** §1 below concludes that "the published TypeScript SDK does
+> not speak" revision `2026-07-28`. That probe read one package name, `@modelcontextprotocol/sdk`
+> (`latest: 1.32.2`, a 2025-11-25 line). The SDK is a monorepo of split packages, and the
+> 2026-07-28 revision ships in the **v2** line under different names:
+> `@modelcontextprotocol/server` / `client` / `core` at `2.4.0`, published since 2026-04-01 and last
+> modified 2026-10-23, verified against the public registry on 2026-11-12. A 2026-07-28 server is
+> reachable through `serveStdio` / `createMcpHandler` on the server side and
+> `versionNegotiation` on the client side.
+>
+> Everything else in this PRD stands and is unchanged: the two-scale split (R1), revision-as-input
+> (R2), advisories for forward features (R3), the self-grade gate (R4), `criteriaVersion` (R5) and
+> the honesty rule (R6) are all still required. §4's non-goal "No attempt to make the SDK speak
+> 2026-07-28. That is upstream's job" is superseded: upstream has done it, so the doctor's job is to
+> adopt it. PRD-006 carries that migration and the remote-server path.
 
 ## 1. What the research found, verified
 
