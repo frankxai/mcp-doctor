@@ -5,6 +5,7 @@
 import { createHash } from "crypto";
 import { dirname, join } from "path";
 import { chmodSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import type { ReconstructionRecord } from "./reconstruct.js";
 
 export type RepairRung = "H1";
 
@@ -48,13 +49,17 @@ export interface HealReceipt {
   rung: RepairRung;
   server: string;
   configPath: string;
+  /** sha256 of this server's own registration bytes; the history store's key. */
+  configHash: string;
   preImageSha256: string;
   postImageSha256: string;
+  /** Redacted only. A receipt is an artifact a user is invited to read. */
   diff: {
     removedEntries: string[];
     quarantinedEntries: string[];
   };
-  preImagePath: string;
+  /** Hole-punched bytes plus offsets; enough to rebuild the pre-image, no values. */
+  reconstruction: ReconstructionRecord;
 }
 
 // ---- minimal output vocabulary matching reporter/format.ts style ----
@@ -275,14 +280,7 @@ export function quarantineEntryText(name: string, rawValue: string, reason: stri
   return `{"name":${JSON.stringify(name)},"config":${rawValue},"reason":${JSON.stringify(reason)}}`;
 }
 
-// ---- artifact persistence (PRD-001 §4.1/§4.2) ----
-
-const PRE_IMAGES_DIR: { section: string; dir: string } = { section: ".mcp-doctor", dir: "pre-images" };
-
-/** Pre-image store lives under the user's home, never inside any repository. */
-export function preImagePathFor(home: string, id: string): string {
-  return join(home, PRE_IMAGES_DIR.section, PRE_IMAGES_DIR.dir, `${id}.json`);
-}
+// ---- artifact persistence (PRD-001 §4.2) ----
 
 /** Temp file plus rename so a partially-written artifact can never be read. */
 export function writeArtifact(path: string, data: string, mode?: number): void {

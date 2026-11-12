@@ -4,15 +4,19 @@
 // comma, siblings keep their original bytes, and a root `quarantined[]` block
 // receives each dead entry with its raw value bytes embedded verbatim.
 //
-// Artifacts follow PRD-001 §4.1: receipts under .mcp-doctor/heal/ carry only
-// hashes and a redacted diff; byte-exact pre-images live in the user's home at
-// .mcp-doctor/pre-images/ with mode 0600, outside every repository. §4.2: the
-// pre-image and the receipt are persisted first (temp file plus rename); the
-// config is written last, so a crash can never strand a mutation the receipts
-// cannot explain.
-import { mkdirSync, writeFileSync } from "fs";
+// Artifacts follow PRD-001 §4.1 without storing the pre-image: receipts under
+// .mcp-doctor/heal/ carry ids, both sha256s, a redacted diff and a hole-punched
+// template of exactly what was removed — never a config value. Rollback rebuilds
+// the pre-image from that template plus the live quarantine block (§4.1 vs §5.3,
+// review surface B). §4.2: receipts are persisted first, atomically; the config
+// is replaced last, also atomically, so a crash can never leave a mutation no
+// receipt explains.
+//
+// The decision itself comes from the durable failure history recorded by
+// `audit` (review surface A): apply never re-probes, so it acts on exactly the
+// evidence `--plan` read.
+import { mkdirSync, statSync } from "fs";
 import { dirname, join } from "path";
-import { homedir } from "os";
 import { redactArgSecrets, redactSecrets } from "../checker/check-server.js";
 import {
   HealPlanItem,
@@ -23,19 +27,25 @@ import {
   healDirFor,
   groupRemovalSpan,
   parseRootObject,
-  preImagePathFor,
   quarantineEntryText,
   scanValueEnd,
   sha256Hex,
   skipWs,
   spliceAll,
-  SpliceEdit,
   writeArtifact,
   bold,
   dim,
   green,
   ruler,
 } from "./types.js";
+import {
+  HoleCandidate,
+  ReconstructionRecord,
+  ReconstructionRemoval,
+  mapOffset,
+  planRemoval,
+} from "./reconstruct.js";
+import { configHashFor } from "./failure-store.js";
 import { planFromText, readClaudeConfigText } from "./plan.js";
 
 export interface ApplyResult {
@@ -47,7 +57,6 @@ export interface ApplyResult {
 }
 
 const NAME_SANITIZE = /[^a-z0-9._-]+/gi;
-const PRE_IMAGE_MODE = 0o600;
 
 /** Deterministic: f(pre-image bytes, server name, rung) — never the clock. */
 export function receiptIdFor(preImage: string, name: string, rung: string): string {
@@ -56,20 +65,39 @@ export function receiptIdFor(preImage: string, name: string, rung: string): stri
   return `${rung.toLowerCase()}-${safe}-${digest}`;
 }
 
-/** Removal edits for every dead member, one per run of adjacent dead
- *  siblings, so no two edits ever claim the same comma (PRD review FIX 3). */
-export function buildRemovals(text: string, items: HealPlanItem[]): SpliceEdit[] {
+interface RemovalSet {
+  edits: { start: number; end: number; replacement: string }[];
+  removals: ReconstructionRemoval[];
+}
+
+/** Removal edits for every run of adjacent dead siblings, one edit per run, so
+ *  no two edits ever claim the same comma (review surface C). Each run carries
+ *  its hole-punched template for rollback. */
+export function buildRemovals(text: string, items: HealPlanItem[]): RemovalSet {
   const groups = coalesceMemberSpans(
     text,
     items.map((item) => ({ start: item.span.memberStart, end: item.span.valueEnd })),
   );
-  return groups.map((group) => {
+  const holes: HoleCandidate[] = items.map((item) => ({
+    name: item.source.name,
+    valueStart: item.span.valueStart,
+    valueEnd: item.span.valueEnd,
+  }));
+
+  const edits: RemovalSet["edits"] = [];
+  const removals: ReconstructionRemoval[] = [];
+  for (const group of groups) {
     const span = groupRemovalSpan(text, group);
-    return { start: span.start, end: span.end, replacement: "" };
-  });
+    const planned = planRemoval(text, span, holes);
+    edits.push(planned.edit);
+    removals.push(planned.removal);
+  }
+  // `coalesceMemberSpans` returns ascending spans, so removals and edits stay
+  // index-aligned and ascending: the order rollback relies on.
+  return { edits, removals };
 }
 
-export function buildQuarantineInsertions(text: string, items: HealPlanItem[]): SpliceEdit[] {
+export function buildQuarantineInsertions(text: string, items: HealPlanItem[]): { edit: { start: number; end: number; replacement: string }; preStart: number } {
   const entriesText = items
     .map((item) => quarantineEntryText(item.source.name, text.slice(item.span.valueStart, item.span.valueEnd), item.reason))
     .join(",");
@@ -86,19 +114,24 @@ export function buildQuarantineInsertions(text: string, items: HealPlanItem[]): 
     if (valueEnd === null) throw new Error("existing quarantined array is malformed");
     const inner = text.slice(existing.valueStart + 1, valueEnd - 1);
     const isEmpty = !/\S/.test(inner);
-    return [{
-      start: valueEnd - 1,
-      end: valueEnd - 1,
-      replacement: (isEmpty ? "" : ",") + entriesText,
-    }];
+    const preStart = valueEnd - 1;
+    return {
+      edit: { start: preStart, end: preStart, replacement: (isEmpty ? "" : ",") + entriesText },
+      preStart,
+    };
   }
-  return [{
-    start: root.start + 1,
-    end: root.start + 1,
-    replacement: `"quarantined":[` + entriesText + `]` + (root.members.length > 0 ? "," : ""),
-  }];
+  const preStart = root.start + 1;
+  return {
+    edit: {
+      start: preStart,
+      end: preStart,
+      replacement: `"quarantined":[` + entriesText + `]` + (root.members.length > 0 ? "," : ""),
+    },
+    preStart,
+  };
 }
 
+/** Rebuild the quarantine block's current bytes for one insertion record. */
 function validatePostImage(newText: string, items: HealPlanItem[]): void {
   const parsed = JSON.parse(newText) as {
     mcpServers?: Record<string, unknown>;
@@ -150,31 +183,43 @@ export async function applyHeal(configPathOverride?: string): Promise<ApplyResul
     return { applied: 0, configPath, preImageSha256: sha256Hex(text), postImageSha256: sha256Hex(text), receiptIds: [], plan };
   }
 
-  const newText = spliceAll(text, [
-    ...buildRemovals(text, plan.items),
-    ...buildQuarantineInsertions(text, plan.items),
-  ]);
+  const removals = buildRemovals(text, plan.items);
+  const insertion = buildQuarantineInsertions(text, plan.items);
+  const newText = spliceAll(text, [...removals.edits, insertion.edit]);
   validatePostImage(newText, plan.items);
 
   const preImageSha256 = sha256Hex(text);
   const postImageSha256 = sha256Hex(newText);
+  const removalFilled = removals.removals.map((removal, i) => {
+    const edit = removals.edits[i];
+    return edit.end - edit.start;
+  });
+  const reconstruction: ReconstructionRecord = {
+    version: 1,
+    removals: removals.removals,
+    insertion: {
+      postStart: mapOffset(insertion.preStart, removals.removals, removalFilled),
+      length: insertion.edit.replacement.length,
+    },
+  };
+
   const receiptDir = healDirFor(configPath);
   const { env, args } = unionEnvAndArgs(plan.items);
   const redact = (value: string) => redactArgSecrets(redactSecrets(value, env), args);
 
-  // §4.2: persist receipt and pre-image atomically, THEN mutate the config.
+  // §4.2: persist every receipt atomically, THEN replace the config, also
+  // atomically. A crash leaves either an untouched config or a receipt for the
+  // change that did land.
   mkdirSync(receiptDir, { recursive: true });
   const receiptIds: string[] = [];
   for (const item of plan.items) {
     const id = receiptIdFor(text, item.source.name, item.rung);
-    const preImagePath = preImagePathFor(homedir(), id);
-    mkdirSync(dirname(preImagePath), { recursive: true });
-    writeArtifact(preImagePath, text, PRE_IMAGE_MODE);
     const receipt: HealReceipt = {
       id,
       rung: item.rung,
       server: item.source.name,
       configPath,
+      configHash: configHashFor(text.slice(item.span.valueStart, item.span.valueEnd)),
       preImageSha256,
       postImageSha256,
       diff: {
@@ -183,15 +228,20 @@ export async function applyHeal(configPathOverride?: string): Promise<ApplyResul
           redact(quarantineEntryText(item.source.name, text.slice(item.span.valueStart, item.span.valueEnd), item.reason)),
         ],
       },
-      preImagePath,
+      reconstruction,
     };
     writeArtifact(join(receiptDir, `${id}.json`), JSON.stringify(receipt, null, 2));
     receiptIds.push(id);
   }
 
-  // The config moves last: a crash after the receipts still leaves an honest
-  // trail (live sha != post sha, so rollback refuses without --force).
-  writeFileSync(configPath, newText, "utf8");
+  // Keep the config's own permission bits: rename replaces the inode.
+  let mode: number | undefined;
+  try {
+    mode = statSync(configPath).mode & 0o777;
+  } catch {
+    mode = undefined;
+  }
+  writeArtifact(configPath, newText, mode);
 
   return { applied: plan.items.length, configPath, preImageSha256, postImageSha256, receiptIds, plan };
 }
@@ -207,7 +257,7 @@ export function formatApply(result: ApplyResult, plan: HealPlan): string {
   // §4.3: the resolved path is printed as the literal first line by the CLI;
   // it is not repeated here.
   if (result.applied === 0) {
-    lines.push(`  ${green("0 repairs applied.")} ${dim("Already healed.")}`);
+    lines.push(`  ${green("0 repairs applied.")} ${dim("Nothing has reached the H1 precondition.")}`);
     return lines.join("\n") + "\n";
   }
 
@@ -216,7 +266,6 @@ export function formatApply(result: ApplyResult, plan: HealPlan): string {
   }
   for (const id of result.receiptIds) {
     lines.push(`      ${dim(`receipt: ${join(healDirFor(result.configPath), id + ".json")}`)}`);
-    lines.push(`      ${dim(`pre-image store: ${preImagePathFor(homedir(), id)} (0600)`)}`);
   }
   lines.push(`      ${dim(`pre-image  sha256: ${result.preImageSha256}`)}`);
   lines.push(`      ${dim(`post-image sha256: ${result.postImageSha256}`)}`);

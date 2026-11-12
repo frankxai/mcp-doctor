@@ -20,13 +20,12 @@ import { checkAllServers } from "./scanner/health-checker.js";
 import { analyzeTiers } from "./analyzer/tier-optimizer.js";
 import { PRESETS } from "./analyzer/presets.js";
 import { detectInstalledAgents, scanAllAgents } from "./scanner/multi-agent-reader.js";
-import { homedir } from "os";
 import { existsSync } from "fs";
 import { resolve } from "path";
 import { planHeal } from "./heal/plan.js";
 import { applyHeal } from "./heal/apply.js";
 import { rollbackHeal } from "./heal/rollback.js";
-import { HealPlan, RECEIPT_ID_PATTERN, preImagePathFor } from "./heal/types.js";
+import { HealPlan, RECEIPT_ID_PATTERN } from "./heal/types.js";
 // The verb table lives in ./heal/modes.ts, the single source of truth the CLI
 // help also renders from (PRD-005 criterion 5): editing a row changes both
 // surfaces with the next build.
@@ -322,7 +321,7 @@ export function createDoctorServer(): McpServer {
     {
       title: "Plan MCP config repairs",
       description:
-        "Read-only dry-run of heal, equivalent to `heal --plan --config <path>`. Reads the exact config file named by configPath (required; the ambient profile is never consulted for an MCP caller), health-probes the stdio servers it declares, and returns the H1 quarantine proposals with redacted reasons plus the entries skipped as remote/unauthenticated/transient. Writes nothing: no config bytes, no receipts, no state directories.",
+        "Read-only dry-run of heal, equivalent to `heal --plan --config <path>`. Reads the exact config file named by configPath (required; the ambient profile is never consulted for an MCP caller) and returns the H1 quarantine proposals it can justify from the durable check history that `audit` records, plus the entries skipped as remote/unauthenticated/transient. A server is proposed only after three consecutive failed audit runs, so a first-time or newly edited registration is never quarantined. Writes nothing: no config bytes, no receipts, no state directories.",
       inputSchema: { configPath: CONFIG_PATH_INPUT },
       outputSchema: {
         configPath: z.string(),
@@ -346,7 +345,7 @@ export function createDoctorServer(): McpServer {
     {
       title: "Apply MCP config repairs",
       description:
-        "Mutating (`heal --apply --config <path> --yes`). Runs the H1 rung on the exact config named by configPath — configPath is required and the ambient profile is never resolved, because MCP callers are not terminal users and a bad environment variable once reached a live config. Dead server entries are quarantined with byte-exact splicing; receipts and 0600 pre-images are recorded beside the target. Returns what applied, the receipt ids, the pre-image paths, and the plan actually executed, so a caller that skipped planning still sees what moved. Writes the named config only.",
+        "Mutating (`heal --apply --config <path> --yes`). Runs the H1 rung on the exact config named by configPath — configPath is required and the ambient profile is never resolved, because MCP callers are not terminal users and a bad environment variable once reached a live config. Entries whose recorded check history already shows three consecutive failures are quarantined with byte-exact splicing; receipts (ids, both sha256s, a redacted diff and a hole-punched removal template — never a config value) are written beside the target before the config is replaced atomically. Returns what applied, the receipt ids, and the plan actually executed, so a caller that skipped planning still sees what moved. Writes the named config only.",
       inputSchema: { configPath: CONFIG_PATH_INPUT },
       outputSchema: {
         applied: z.number(),
@@ -354,7 +353,6 @@ export function createDoctorServer(): McpServer {
         receiptIds: z.array(z.string()),
         preImageSha256: z.string(),
         postImageSha256: z.string(),
-        preImagePath: z.array(z.object({ id: z.string(), path: z.string() })),
         plan: healPlanSchema,
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -371,7 +369,6 @@ export function createDoctorServer(): McpServer {
         receiptIds: result.receiptIds,
         preImageSha256: result.preImageSha256,
         postImageSha256: result.postImageSha256,
-        preImagePath: result.receiptIds.map((id) => ({ id, path: preImagePathFor(homedir(), id) })),
         plan: slimPlan(result.plan),
       });
     },
