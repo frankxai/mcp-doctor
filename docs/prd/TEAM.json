@@ -1,0 +1,95 @@
+{
+  "$schema": "starlight.agent-team.v1",
+  "contract": "starlight.agent-team.v1",
+  "team": "mcp-doctor-build",
+  "repo": "C:\\Users\\frank\\starlight\\repos\\mcp-doctor",
+  "origin": "https://github.com/frankxai/mcp-doctor",
+  "branch": "agent/opencode/heal-evolve-prd",
+  "created": "2026-11-08",
+  "updated": "2026-11-08",
+  "machineOrder": {
+    "source": "pp preflight --workload interactive",
+    "observed": "ALLOW, limit 1 parallel, RAM 1867MB against 4096MB required",
+    "rule": "lanes run one at a time; the roster is real, the concurrency is not",
+    "recheckBeforeDispatch": "pp preflight --workload interactive"
+  },
+  "roles": [
+    {
+      "id": "orchestrator",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "rank": "planning, PRD, integration, final verification",
+      "writes": ["docs/prd/**", "docs/review/**"],
+      "cannot": ["implement a lane it also verifies"],
+      "costPerMTok": { "input": 0.0, "output": 0.0, "note": "flat plan seat" }
+    },
+    {
+      "id": "implementer",
+      "model": "opencode-go/glm-5.3-flash",
+      "rank": "build",
+      "writes": ["src/heal/**", "src/cli.ts", "src/mcp-server.ts", "test/heal*.test.mjs", "test/serve.test.mjs"],
+      "cannot": ["edit src/checker/score.ts", "widen scope to make a test pass", "run heal --apply without --config or --yes outside a temp dir"],
+      "costPerMTok": { "input": 0.15, "output": 0.5, "cacheRead": 0.03 },
+      "why": "cheapest capable writer on the plan; $0.03 cached reads suit a lane that re-reads the same files"
+    },
+    {
+      "id": "researcher",
+      "model": "opencode-go/hy3",
+      "rank": "discovery, read-only",
+      "writes": ["docs/research/**"],
+      "cannot": ["touch src/", "run the project test suite"],
+      "costPerMTok": { "input": null, "output": null, "note": "measure against the plan before quoting" }
+    },
+    {
+      "id": "verifier",
+      "model": "opencode-go/hy4",
+      "rank": "adversarial review",
+      "writes": ["docs/review/**"],
+      "cannot": ["be the same model that wrote the code under review", "receive the author's reasoning instead of the artifact"],
+      "costPerMTok": { "input": null, "output": null, "note": "measure against the plan before quoting" }
+    }
+  ],
+  "rules": {
+    "makerNotChecker": true,
+    "differentFamily": true,
+    "defaultVerdict": "refused",
+    "noSecretInReceipt": true,
+    "laneClaim": "node tools/lane.mjs claim --harness <id> --repo repos/mcp-doctor --paths \"<globs>\"",
+    "opsClaim": "starlight-ops claim --repo <abs> --origin <url> --branch <branch> --owner opencode --file <path> --source <intent> --done-when <acceptance> --adopt"
+  },
+  "handoffs": [
+    "orchestrator -> implementer: one PRD slice, acceptance criteria quoted verbatim",
+    "implementer -> orchestrator: test output, diff stat, unmet criteria",
+    "orchestrator -> researcher: the open question only, never the whole PRD",
+    "orchestrator -> verifier: artifact plus criteria, never the author's reasoning",
+    "verifier -> orchestrator: PASS / FAIL / NEEDS-HUMAN per criterion, default refused"
+  ],
+  "definitionOfDone": [
+    "every criterion in the slice passes with a quoted assertion, or is listed as not met",
+    "npm test green except documented pre-existing failures, named in the receipt",
+    "git status shows no file outside the lane's scope",
+    "no secret value in any receipt, log or fixture",
+    "docs/review/<slice>-<date>.md signed by the verifier's model id"
+  ],
+  "lanes": [
+    {
+      "slice": "S1",
+      "prd": "docs/prd/PRD-001-heal.md",
+      "state": "landed",
+      "commit": "bba23d1",
+      "evidence": "19 tests in test/heal-s1.test.mjs, suite 78/80 with two pre-existing release.test.mjs failures",
+      "review": "docs/review/heal-s1-2026-11-08.md"
+    },
+    {
+      "slice": "M1",
+      "prd": "docs/prd/PRD-005-mcp-surface.md",
+      "state": "next",
+      "evidence": "not started"
+    },
+    {
+      "slice": "E1",
+      "prd": "docs/prd/PRD-002-evolve.md",
+      "state": "queued",
+      "evidence": "blocked on M1 landing so the MCP surface reports trends too"
+    }
+  ]
+}
